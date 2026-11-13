@@ -14,8 +14,8 @@
 | Milestone                      | Scope                                                                                                    | Status         |
 | ------------------------------ | -------------------------------------------------------------------------------------------------------- | -------------- |
 | **M0 — Repo Foundation**       | Vite/React/TS, Tailwind, lint, typecheck, Dockerfile, Compose, CI skeleton                               | ✅ Completed   |
-| **M1 — Supabase Foundation**   | Local Supabase CLI, email/password + Google OAuth, profiles/workspaces, migrations, RLS, private buckets | 🔄 Next Up     |
-| **M2 — Dataset Management**    | Upload, private Storage, metadata, formats, preview, delete                                              | ⬜ Not Started |
+| **M1 — Supabase Foundation**   | Local Supabase CLI, email/password + Google OAuth, profiles/workspaces, migrations, RLS, private buckets | ✅ Completed   |
+| **M2 — Dataset Management**    | Upload, private Storage, metadata, formats, preview, delete                                              | 🔄 Next Up     |
 | **M3 — Data Engine**           | DuckDB-Wasm worker, schema inference, profile, quality report                                            | ⬜ Not Started |
 | **M4 — EDA**                   | Plotly charts, correlation, sample strategy, target exploration                                          | ⬜ Not Started |
 | **M5 — Preprocessing**         | Imputation, dedupe, encoding, scaling, outliers, datetime, preview                                       | ⬜ Not Started |
@@ -104,20 +104,21 @@ README.md
 
 ---
 
-## M1 — Supabase Foundation (Preview)
-
-### Prerequisites (Owner Action Required)
-
-- Supabase project URL and publishable key
-- Google OAuth client ID and secret
-- Docker running for Supabase CLI local stack
+## M1 — Supabase Foundation (Detailed)
 
 ### Tasks
 
-- Initialize Supabase CLI project
-- Create migration: `profiles`, `workspaces` tables
-- Enable RLS on all tables
-- Configure email/password auth
+- [x] Create initial schema migration (`supabase/migrations/20261113000000_initial_schema.sql`)
+- [x] Configure `profiles`, `workspaces`, and `ai_preferences` tables
+- [x] Add auto-profile and default workspace triggers on user signup
+- [x] Enable RLS on all tables with single-owner isolation policies
+- [x] Configure private Storage buckets (`datasets`, `artifacts`) with path-based owner RLS
+- [x] Install `@supabase/supabase-js` and configure Supabase client
+- [x] Create React `AuthProvider` and `useAuth` hook
+- [x] Implement Auth UI (Sign In, Sign Up, Google OAuth) on Landing Page
+- [x] Implement Dashboard page with Workspace selector and profile header
+- [x] Add automated RLS invariant and cross-user isolation unit tests
+- [x] Commit and push M1 to git
 - Configure Google OAuth provider
 - Set up Mailpit for local email testing
 - Write cross-user RLS isolation tests
