@@ -1,0 +1,36 @@
+# Groundwork — Docker Compose (Development)
+#
+# This file runs the web frontend dev server only.
+# Supabase local stack is managed by `npx supabase start` (see docs/DECISIONS.md D007).
+#
+# Usage:
+#   docker compose up web-dev        # start dev server with hot reload
+#   docker compose up web-preview    # build and preview production image
+
+services:
+  web-dev:
+    image: node:22-alpine
+    working_dir: /app
+    volumes:
+      - .:/app
+      - node_modules:/app/node_modules
+      - web_node_modules:/app/apps/web/node_modules
+    ports:
+      - '5173:5173'
+    command: sh -c "npm install && npm run dev"
+    environment:
+      - VITE_SUPABASE_URL=${VITE_SUPABASE_URL:-http://localhost:54321}
+      - VITE_SUPABASE_PUBLISHABLE_KEY=${VITE_SUPABASE_PUBLISHABLE_KEY:-your-anon-key}
+
+  web-preview:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - '8080:80'
+    profiles:
+      - preview
+
+volumes:
+  node_modules:
+  web_node_modules:

@@ -1,0 +1,51 @@
+# Supabase CLI configuration — initialized for Groundwork V1
+# Full local Supabase stack: Auth, PostgreSQL, Storage, Edge Functions, Mailpit
+#
+# Start with: npx supabase start
+# Stop with:  npx supabase stop
+# Reset DB:   npx supabase db reset
+
+[project]
+id = "groundwork-local"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+smtp_port = 54325
+pop3_port = 54326
+
+[storage]
+enabled = true
+file_size_limit = "40MiB"
+
+[auth]
+enabled = true
+site_url = "http://localhost:5173"
+additional_redirect_urls = ["http://localhost:5173"]
+
+[auth.email]
+enable_signup = true
+double_confirm_changes = true
+enable_confirmations = true
+
+[auth.external.google]
+enabled = false
+# client_id = ""    # Set in .env or Supabase dashboard
+# secret = ""       # Set in .env or Supabase dashboard
+# redirect_uri = "" # Configured after project setup

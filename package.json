@@ -1,0 +1,23 @@
+{
+  "name": "groundwork",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-assisted conversational data preparation platform",
+  "workspaces": [
+    "apps/web"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/web",
+    "build": "npm run build -w apps/web",
+    "preview": "npm run preview -w apps/web",
+    "lint": "npm run lint -w apps/web",
+    "typecheck": "npm run typecheck -w apps/web",
+    "test": "npm run test -w apps/web",
+    "test:ui": "npm run test:ui -w apps/web",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

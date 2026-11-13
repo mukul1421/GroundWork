@@ -1,0 +1,8 @@
+dist
+node_modules
+coverage
+supabase/.temp
+supabase/.branches
+playwright-report
+test-results
+*.log
