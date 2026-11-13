@@ -1,4 +1,10 @@
-export type Json = string | number | boolean | null | { [key: string]: Json | undefined } | Json[];
+export type Json =
+  | string
+  | number
+  | boolean
+  | null
+  | { [key: string]: Json | undefined }
+  | Json[];
 
 export interface Database {
   public: {
@@ -156,6 +162,66 @@ export interface Database {
         };
         Relationships: [];
       };
+      dataset_profiles: {
+        Row: {
+          dataset_version_id: string;
+          generated_at: string;
+          id: string;
+          profile_json: Json;
+          quality_json: Json;
+        };
+        Insert: {
+          dataset_version_id: string;
+          generated_at?: string;
+          id?: string;
+          profile_json?: Json;
+          quality_json?: Json;
+        };
+        Update: {
+          dataset_version_id?: string;
+          generated_at?: string;
+          id?: string;
+          profile_json?: Json;
+          quality_json?: Json;
+        };
+        Relationships: [];
+      };
+      column_profiles: {
+        Row: {
+          column_name: string;
+          created_at: string;
+          dataset_version_id: string;
+          distinct_count: number;
+          id: string;
+          inferred_type: string;
+          missing_count: number;
+          nullable: boolean;
+          stats_json: Json;
+        };
+        Insert: {
+          column_name: string;
+          created_at?: string;
+          dataset_version_id: string;
+          distinct_count?: number;
+          id?: string;
+          inferred_type: string;
+          missing_count?: number;
+          nullable?: boolean;
+          stats_json?: Json;
+        };
+        Update: {
+          column_name?: string;
+          created_at?: string;
+          dataset_version_id?: string;
+          distinct_count?: number;
+          id?: string;
+          inferred_type?: string;
+          missing_count?: number;
+          nullable?: boolean;
+          stats_json?: Json;
+        };
+        Relationships: [];
+      };
     };
     Views: {
       [_ in never]: never;
@@ -177,3 +243,5 @@ export type Workspace = Database['public']['Tables']['workspaces']['Row'];
 export type AIPreference = Database['public']['Tables']['ai_preferences']['Row'];
 export type Dataset = Database['public']['Tables']['datasets']['Row'];
 export type DatasetVersion = Database['public']['Tables']['dataset_versions']['Row'];
+export type DatasetProfile = Database['public']['Tables']['dataset_profiles']['Row'];
+export type ColumnProfile = Database['public']['Tables']['column_profiles']['Row'];
