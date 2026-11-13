@@ -15,8 +15,8 @@
 | ------------------------------ | -------------------------------------------------------------------------------------------------------- | -------------- |
 | **M0 — Repo Foundation**       | Vite/React/TS, Tailwind, lint, typecheck, Dockerfile, Compose, CI skeleton                               | ✅ Completed   |
 | **M1 — Supabase Foundation**   | Local Supabase CLI, email/password + Google OAuth, profiles/workspaces, migrations, RLS, private buckets | ✅ Completed   |
-| **M2 — Dataset Management**    | Upload, private Storage, metadata, formats, preview, delete                                              | 🔄 Next Up     |
-| **M3 — Data Engine**           | DuckDB-Wasm worker, schema inference, profile, quality report                                            | ⬜ Not Started |
+| **M2 — Dataset Management**    | Upload, private Storage, metadata, formats, preview, delete                                              | ✅ Completed   |
+| **M3 — Data Engine**           | DuckDB-Wasm worker, schema inference, profile, quality report                                            | 🔄 Next Up     |
 | **M4 — EDA**                   | Plotly charts, correlation, sample strategy, target exploration                                          | ⬜ Not Started |
 | **M5 — Preprocessing**         | Imputation, dedupe, encoding, scaling, outliers, datetime, preview                                       | ⬜ Not Started |
 | **M6 — Versioning + Approval** | Plan preview, explicit approval, immutable versions, operation history, undo/restore                     | ⬜ Not Started |

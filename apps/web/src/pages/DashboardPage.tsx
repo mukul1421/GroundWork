@@ -1,5 +1,13 @@
-import { useState, type SyntheticEvent } from 'react';
+import { useState, useEffect, useCallback, type SyntheticEvent } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { useAuth, supabase } from '@/integrations/supabase';
+import { DatasetUploadModal } from '@/components/datasets/DatasetUploadModal';
+import { deleteDataset } from '@/storage/datasetStorage';
+import type { Dataset, DatasetVersion } from '@/types/database';
+
+interface DatasetWithVersion extends Dataset {
+  active_version?: DatasetVersion | null;
+}
 
 export function DashboardPage() {
   const {
@@ -11,9 +19,66 @@ export function DashboardPage() {
     signOut,
     refreshWorkspaces,
   } = useAuth();
+  const navigate = useNavigate();
+
   const [creatingWorkspace, setCreatingWorkspace] = useState(false);
   const [newWorkspaceName, setNewWorkspaceName] = useState('');
   const [workspaceError, setWorkspaceError] = useState<string | null>(null);
+
+  const [datasets, setDatasets] = useState<DatasetWithVersion[]>([]);
+  const [loadingDatasets, setLoadingDatasets] = useState(false);
+  const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
+  const [deletingId, setDeletingId] = useState<string | null>(null);
+
+  const fetchDatasets = useCallback(async () => {
+    if (!activeWorkspace) return;
+    setLoadingDatasets(true);
+
+    try {
+      const { data: datasetsData, error: dsError } = await supabase
+        .from('datasets')
+        .select('*')
+        .eq('workspace_id', activeWorkspace.id)
+        .order('created_at', { ascending: false });
+
+      if (dsError) throw dsError;
+
+      if (datasetsData.length > 0) {
+        // Fetch active versions for these datasets
+        const versionIds = datasetsData
+          .map((d) => d.active_version_id)
+          .filter((id): id is string => Boolean(id));
+
+        let versionsMap: Record<string, DatasetVersion> = {};
+        if (versionIds.length > 0) {
+          const { data: versionsData } = await supabase
+            .from('dataset_versions')
+            .select('*')
+            .in('id', versionIds);
+
+          if (versionsData) {
+            versionsMap = Object.fromEntries(versionsData.map((v) => [v.id, v]));
+          }
+        }
+
+        const enriched: DatasetWithVersion[] = datasetsData.map((d) => ({
+          ...d,
+          active_version: d.active_version_id ? versionsMap[d.active_version_id] : null,
+        }));
+        setDatasets(enriched);
+      } else {
+        setDatasets([]);
+      }
+    } catch {
+      // Quiet fail
+    } finally {
+      setLoadingDatasets(false);
+    }
+  }, [activeWorkspace]);
+
+  useEffect(() => {
+    void fetchDatasets();
+  }, [fetchDatasets]);
 
   const handleCreateWorkspace = async (e: SyntheticEvent) => {
     e.preventDefault();
@@ -38,6 +103,29 @@ export function DashboardPage() {
       setActiveWorkspace(data);
     }
   };
+
+  const handleDeleteDataset = async (dataset: Dataset) => {
+    if (!user) return;
+    if (!window.confirm(`Are you sure you want to delete dataset "${dataset.name}"?`)) {
+      return;
+    }
+
+    setDeletingId(dataset.id);
+    try {
+      await deleteDataset(dataset, user.id);
+      await fetchDatasets();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : 'Delete failed');
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
+  const totalStorageBytes = datasets.reduce(
+    (acc, ds) => acc + (ds.active_version?.file_size_bytes ?? 0),
+    0,
+  );
+  const totalStorageMB = (totalStorageBytes / (1024 * 1024)).toFixed(1);
 
   return (
     <div className="min-h-screen bg-slate-900 text-slate-100">
@@ -161,7 +249,9 @@ export function DashboardPage() {
             <div className="text-xs font-medium uppercase tracking-wider text-slate-400">
               Storage Usage
             </div>
-            <div className="mt-2 text-xl font-bold text-emerald-400">0 MB / 40 MB</div>
+            <div className="mt-2 text-xl font-bold text-emerald-400">
+              {totalStorageMB} MB / 40 MB
+            </div>
             <p className="mt-1 text-xs text-slate-500">Free-tier allocation for private datasets</p>
           </div>
 
@@ -188,23 +278,117 @@ export function DashboardPage() {
             </div>
             <button
               type="button"
+              onClick={() => setIsUploadModalOpen(true)}
               className="rounded-lg bg-sky-500 px-4 py-2 text-xs font-semibold text-white shadow transition hover:bg-sky-400"
             >
               + Upload Dataset
             </button>
           </div>
 
-          {/* Empty State */}
-          <div className="mt-8 rounded-lg border border-dashed border-slate-700/60 p-10 text-center">
-            <p className="text-sm font-medium text-slate-300">
-              No datasets uploaded to this workspace yet
-            </p>
-            <p className="mt-1 text-xs text-slate-500">
-              Dataset upload, validation, and browser-side DuckDB profiling will be enabled in M2.
-            </p>
-          </div>
+          {/* Datasets List / Table */}
+          {loadingDatasets ? (
+            <div className="p-12 text-center text-xs text-slate-400">
+              Loading workspace datasets...
+            </div>
+          ) : datasets.length === 0 ? (
+            /* Empty State */
+            <div className="mt-8 rounded-lg border border-dashed border-slate-700/60 p-10 text-center">
+              <p className="text-sm font-medium text-slate-300">
+                No datasets uploaded to this workspace yet
+              </p>
+              <p className="mt-1 text-xs text-slate-500">
+                Click &ldquo;+ Upload Dataset&rdquo; above to upload your first CSV, XLSX, JSON, or
+                JSONL file.
+              </p>
+            </div>
+          ) : (
+            <div className="mt-6 overflow-hidden rounded-lg border border-slate-800">
+              <table className="w-full text-left text-xs">
+                <thead className="border-b border-slate-800 bg-slate-950/80 text-slate-400">
+                  <tr>
+                    <th className="px-4 py-3 font-semibold text-slate-300">Dataset Name</th>
+                    <th className="px-4 py-3 font-semibold text-slate-300">Format</th>
+                    <th className="px-4 py-3 font-semibold text-slate-300">Dimensions</th>
+                    <th className="px-4 py-3 font-semibold text-slate-300">Size</th>
+                    <th className="px-4 py-3 font-semibold text-slate-300">Version</th>
+                    <th className="px-4 py-3 text-right font-semibold text-slate-300">Actions</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/60 text-slate-300">
+                  {datasets.map((ds) => (
+                    <tr key={ds.id} className="transition hover:bg-slate-800/40">
+                      <td className="px-4 py-3">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            void navigate(`/datasets/${ds.id}`);
+                          }}
+                          className="font-medium text-sky-400 hover:underline"
+                        >
+                          {ds.name}
+                        </button>
+                        <p className="text-[10px] text-slate-500">{ds.source_filename}</p>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="rounded bg-sky-500/20 px-2 py-0.5 font-mono text-[10px] font-semibold uppercase text-sky-400">
+                          {ds.source_format}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs">
+                        {ds.active_version
+                          ? `${ds.active_version.row_count.toLocaleString()} rows × ${ds.active_version.column_count} cols`
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs">
+                        {ds.active_version
+                          ? `${(ds.active_version.file_size_bytes / 1024).toFixed(1)} KB`
+                          : '—'}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="rounded bg-emerald-950/60 px-2 py-0.5 text-[10px] font-medium text-emerald-400 border border-emerald-800/40">
+                          v{ds.active_version?.version_number ?? 1}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <div className="flex items-center justify-end gap-2">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              void navigate(`/datasets/${ds.id}`);
+                            }}
+                            className="rounded px-2 py-1 text-xs text-slate-300 hover:bg-slate-800 hover:text-white"
+                          >
+                            Explore
+                          </button>
+                          <button
+                            type="button"
+                            disabled={deletingId === ds.id}
+                            onClick={() => {
+                              void handleDeleteDataset(ds);
+                            }}
+                            className="rounded px-2 py-1 text-xs text-rose-400 hover:bg-rose-950/40 hover:text-rose-300 disabled:opacity-50"
+                          >
+                            {deletingId === ds.id ? 'Deleting...' : 'Delete'}
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </div>
       </main>
+
+      {/* Upload Modal */}
+      <DatasetUploadModal
+        isOpen={isUploadModalOpen}
+        onClose={() => setIsUploadModalOpen(false)}
+        onUploadSuccess={() => {
+          void fetchDatasets();
+        }}
+      />
     </div>
   );
 }
