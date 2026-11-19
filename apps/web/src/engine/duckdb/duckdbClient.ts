@@ -20,8 +20,8 @@ export async function getDuckDB(): Promise<duckdb.AsyncDuckDB> {
         throw new Error('DuckDB WebAssembly main worker could not be selected.');
       }
 
-      // Create worker from CDN bundle or URL
-      const worker = new Worker(bundle.mainWorker);
+      // Create worker via duckdb.createWorker (fetches as blob URL to satisfy Same-Origin Policy)
+      const worker = await duckdb.createWorker(bundle.mainWorker);
       const logger = new duckdb.VoidLogger();
       const db = new duckdb.AsyncDuckDB(logger, worker);
 

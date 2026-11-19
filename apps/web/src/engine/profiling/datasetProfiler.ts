@@ -1,4 +1,5 @@
 import type { AsyncDuckDBConnection } from '@duckdb/duckdb-wasm';
+import type { Table } from 'apache-arrow';
 import { supabase } from '@/integrations/supabase';
 import type { Json } from '@/types/database';
 
@@ -43,16 +44,32 @@ export interface DatasetProfileSummary {
   columns: ColumnProfileSummary[];
 }
 
-interface RowJsonRecord {
-  toJSON(): Record<string, unknown>;
+/**
+ * Bulletproof helper to extract a scalar value from an Apache Arrow Table.
+ * Avoids StructRowProxy traps and supports case-insensitivity & numeric indices.
+ */
+function getScalar(table: Table, nameOrIndex: string | number, rowIndex = 0): unknown {
+  try {
+    const col =
+      typeof nameOrIndex === 'string'
+        ? (table.getChild(nameOrIndex) ??
+          table.getChild(nameOrIndex.toLowerCase()) ??
+          table.getChild(nameOrIndex.toUpperCase()))
+        : table.getChildAt(nameOrIndex);
+    return col ? col.get(rowIndex) : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
-function rowToJson(row: unknown): Record<string, unknown> {
-  if (row && typeof row === 'object' && 'toJSON' in row) {
-    const candidate = row as RowJsonRecord;
-    return candidate.toJSON();
+function toNum(val: unknown, fallback = 0): number {
+  if (typeof val === 'number') return isNaN(val) ? fallback : val;
+  if (typeof val === 'bigint') return Number(val);
+  if (typeof val === 'string') {
+    const parsed = Number(val);
+    return isNaN(parsed) ? fallback : parsed;
   }
-  return {};
+  return fallback;
 }
 
 /**
@@ -65,22 +82,33 @@ export async function profileTable(
 ): Promise<DatasetProfileSummary> {
   // 1. Get Table Schema & Column Types
   const schemaResult = await conn.query(`DESCRIBE ${tableName}`);
-  const schemaRows = (schemaResult.toArray() as unknown[]).map((r) => {
-    const obj = rowToJson(r);
-    return {
-      column_name: typeof obj.column_name === 'string' ? obj.column_name : '',
-      column_type: typeof obj.column_type === 'string' ? obj.column_type : '',
-    };
-  });
+  const colNameVec =
+    schemaResult.getChild('column_name') ??
+    schemaResult.getChild('COLUMN_NAME') ??
+    schemaResult.getChildAt(0);
+  const colTypeVec =
+    schemaResult.getChild('column_type') ??
+    schemaResult.getChild('COLUMN_TYPE') ??
+    schemaResult.getChildAt(1);
+
+  const schemaRows: Array<{ column_name: string; column_type: string }> = [];
+  for (let i = 0; i < schemaResult.numRows; i++) {
+    const cn = String(colNameVec?.get(i) ?? '').trim();
+    const ct = String(colTypeVec?.get(i) ?? '').trim();
+    if (cn) {
+      schemaRows.push({ column_name: cn, column_type: ct });
+    }
+  }
 
   const columnsList = schemaRows.map((c) => c.column_name);
   const columnCount = columnsList.length;
 
   // 2. Compute Row Count
-  const countResult = await conn.query(`SELECT COUNT(*)::BIGINT AS total FROM ${tableName}`);
-  const countRows = countResult.toArray() as unknown[];
-  const totalVal = rowToJson(countRows[0]).total;
-  const rowCount = typeof totalVal === 'number' || typeof totalVal === 'bigint' ? Number(totalVal) : 0;
+  const countResult = await conn.query(
+    `SELECT COUNT(*)::BIGINT AS total FROM ${tableName}`,
+  );
+  const rawTotal = getScalar(countResult, 'total', 0) ?? getScalar(countResult, 0, 0);
+  const rowCount = toNum(rawTotal, 0);
 
   if (rowCount === 0) {
     return {
@@ -99,11 +127,9 @@ export async function profileTable(
   const distinctRowsResult = await conn.query(
     `SELECT COUNT(*)::BIGINT AS distinct_rows FROM (SELECT DISTINCT ${safeCols} FROM ${tableName})`,
   );
-  const distinctRowsVal = rowToJson((distinctRowsResult.toArray() as unknown[])[0]).distinct_rows;
-  const distinctRows =
-    typeof distinctRowsVal === 'number' || typeof distinctRowsVal === 'bigint'
-      ? Number(distinctRowsVal)
-      : rowCount;
+  const distinctRowsVal =
+    getScalar(distinctRowsResult, 'distinct_rows', 0) ?? getScalar(distinctRowsResult, 0, 0);
+  const distinctRows = toNum(distinctRowsVal, rowCount);
   const duplicateRowsCount = Math.max(0, rowCount - distinctRows);
 
   // 4. Compute per-column metrics
@@ -129,13 +155,14 @@ export async function profileTable(
       FROM ${tableName}
     `);
 
-    const basicStats = rowToJson((basicStatsResult.toArray() as unknown[])[0]);
-    const missingVal = basicStats.missing_count;
-    const distinctVal = basicStats.distinct_count;
-    const missingCount =
-      typeof missingVal === 'number' || typeof missingVal === 'bigint' ? Number(missingVal) : 0;
-    const distinctCount =
-      typeof distinctVal === 'number' || typeof distinctVal === 'bigint' ? Number(distinctVal) : 0;
+    const missingCount = toNum(
+      getScalar(basicStatsResult, 'missing_count', 0) ?? getScalar(basicStatsResult, 0, 0),
+      0,
+    );
+    const distinctCount = toNum(
+      getScalar(basicStatsResult, 'distinct_count', 0) ?? getScalar(basicStatsResult, 1, 0),
+      0,
+    );
     const missingPercent = rowCount > 0 ? (missingCount / rowCount) * 100 : 0;
     const uniquenessPercent = rowCount > 0 ? (distinctCount / rowCount) * 100 : 0;
     const isConstant = distinctCount === 1;
@@ -161,9 +188,21 @@ export async function profileTable(
         WHERE "${colName}" IS NOT NULL
       `);
 
-      const numData = rowToJson((numStatsResult.toArray() as unknown[])[0]);
-      const q25 = typeof numData.col_q25 === 'number' ? numData.col_q25 : null;
-      const q75 = typeof numData.col_q75 === 'number' ? numData.col_q75 : null;
+      const rawMin = getScalar(numStatsResult, 'col_min', 0);
+      const rawMax = getScalar(numStatsResult, 'col_max', 0);
+      const rawMean = getScalar(numStatsResult, 'col_mean', 0);
+      const rawStddev = getScalar(numStatsResult, 'col_stddev', 0);
+      const rawMedian = getScalar(numStatsResult, 'col_median', 0);
+      const rawQ25 = getScalar(numStatsResult, 'col_q25', 0);
+      const rawQ75 = getScalar(numStatsResult, 'col_q75', 0);
+
+      const min = rawMin !== null && rawMin !== undefined ? toNum(rawMin) : null;
+      const max = rawMax !== null && rawMax !== undefined ? toNum(rawMax) : null;
+      const mean = rawMean !== null && rawMean !== undefined ? toNum(rawMean) : null;
+      const stddev = rawStddev !== null && rawStddev !== undefined ? toNum(rawStddev) : null;
+      const median = rawMedian !== null && rawMedian !== undefined ? toNum(rawMedian) : null;
+      const q25 = rawQ25 !== null && rawQ25 !== undefined ? toNum(rawQ25) : null;
+      const q75 = rawQ75 !== null && rawQ75 !== undefined ? toNum(rawQ75) : null;
       const iqr = q25 !== null && q75 !== null ? q75 - q25 : null;
 
       let outlierCount = 0;
@@ -175,19 +214,18 @@ export async function profileTable(
           FROM ${tableName} 
           WHERE "${colName}" < ${lowerBound} OR "${colName}" > ${upperBound}
         `);
-        const outlierVal = rowToJson((outlierResult.toArray() as unknown[])[0]).outliers;
-        outlierCount =
-          typeof outlierVal === 'number' || typeof outlierVal === 'bigint'
-            ? Number(outlierVal)
-            : 0;
+        outlierCount = toNum(
+          getScalar(outlierResult, 'outliers', 0) ?? getScalar(outlierResult, 0, 0),
+          0,
+        );
       }
 
       stats = {
-        min: typeof numData.col_min === 'number' ? numData.col_min : null,
-        max: typeof numData.col_max === 'number' ? numData.col_max : null,
-        mean: typeof numData.col_mean === 'number' ? numData.col_mean : null,
-        stddev: typeof numData.col_stddev === 'number' ? numData.col_stddev : null,
-        median: typeof numData.col_median === 'number' ? numData.col_median : null,
+        min,
+        max,
+        mean,
+        stddev,
+        median,
         q25,
         q75,
         iqr,
@@ -206,24 +244,27 @@ export async function profileTable(
         LIMIT 10
       `);
 
-      const topFrequencies = (freqResult.toArray() as unknown[]).map((r) => {
-        const rowJson = rowToJson(r);
-        const count =
-          typeof rowJson.cat_count === 'number' || typeof rowJson.cat_count === 'bigint'
-            ? Number(rowJson.cat_count)
-            : 0;
-        let catValStr = 'null';
-        if (typeof rowJson.cat_val === 'string') {
-          catValStr = rowJson.cat_val;
-        } else if (typeof rowJson.cat_val === 'number' || typeof rowJson.cat_val === 'boolean') {
-          catValStr = `${rowJson.cat_val}`;
-        }
-        return {
-          value: catValStr,
+      const catValCol = freqResult.getChild('cat_val') ?? freqResult.getChildAt(0);
+      const catCountCol = freqResult.getChild('cat_count') ?? freqResult.getChildAt(1);
+      const topFrequencies: CategoricalFrequency[] = [];
+
+      for (let i = 0; i < freqResult.numRows; i++) {
+        const rawVal: unknown = catValCol?.get(i);
+        const count = toNum(catCountCol?.get(i), 0);
+        const valStr =
+          typeof rawVal === 'string'
+            ? rawVal
+            : typeof rawVal === 'number' ||
+                typeof rawVal === 'boolean' ||
+                typeof rawVal === 'bigint'
+              ? String(rawVal)
+              : 'null';
+        topFrequencies.push({
+          value: valStr,
           count,
           percent: rowCount > 0 ? (count / rowCount) * 100 : 0,
-        };
-      });
+        });
+      }
 
       stats = { topFrequencies };
     }
@@ -257,27 +298,46 @@ export async function profileTable(
 }
 
 /**
+ * Recursively converts any BigInt values into safe Numbers so JSON.stringify / Supabase never throws.
+ */
+export function sanitizeJson(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj === 'bigint') return Number(obj);
+  if (Array.isArray(obj)) return obj.map((item: unknown) => sanitizeJson(item));
+  if (typeof obj === 'object') {
+    const res: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      res[k] = sanitizeJson(v);
+    }
+    return res;
+  }
+  return obj;
+}
+
+/**
  * Persists computed profile summary into PostgreSQL per Spec §5.1 step 7.
  * Compact JSON metadata only — no raw rows.
  */
 export async function saveProfileToDatabase(
   datasetVersionId: string,
   profile: DatasetProfileSummary,
+  correlation?: unknown,
 ): Promise<void> {
   // 1. Upsert dataset_profiles
-  const profileJson: Json = {
+  const profileJson: Json = sanitizeJson({
     rowCount: profile.rowCount,
     columnCount: profile.columnCount,
     duplicateRowsCount: profile.duplicateRowsCount,
     constantColumnsCount: profile.constantColumnsCount,
     overallMissingRate: profile.overallMissingRate,
-  };
+    ...(correlation ? { correlation } : {}),
+  }) as Json;
 
-  const qualityJson: Json = {
+  const qualityJson: Json = sanitizeJson({
     hasDuplicates: profile.duplicateRowsCount > 0,
     hasMissingValues: profile.overallMissingRate > 0,
     hasConstantColumns: profile.constantColumnsCount > 0,
-  };
+  }) as Json;
 
   const { error: dsProfileError } = await supabase.from('dataset_profiles').upsert(
     {
@@ -298,16 +358,18 @@ export async function saveProfileToDatabase(
     column_name: col.columnName,
     inferred_type: col.inferredType,
     nullable: col.nullable,
-    missing_count: col.missingCount,
-    distinct_count: col.distinctCount,
-    stats_json: JSON.parse(JSON.stringify(col.stats)) as Json,
+    missing_count: toNum(col.missingCount),
+    distinct_count: toNum(col.distinctCount),
+    stats_json: sanitizeJson(col.stats) as Json,
   }));
 
-  const { error: colProfileError } = await supabase
-    .from('column_profiles')
-    .upsert(columnInserts, { onConflict: 'dataset_version_id,column_name' });
+  if (columnInserts.length > 0) {
+    const { error: colProfileError } = await supabase
+      .from('column_profiles')
+      .upsert(columnInserts, { onConflict: 'dataset_version_id,column_name' });
 
-  if (colProfileError) {
-    throw new Error(`Failed to save column profiles: ${colProfileError.message}`);
+    if (colProfileError) {
+      throw new Error(`Failed to save column profiles: ${colProfileError.message}`);
+    }
   }
 }
