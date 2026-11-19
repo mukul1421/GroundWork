@@ -2,6 +2,7 @@ import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './integrations/supabase';
 import { LandingPage } from './pages/LandingPage';
 import { DashboardPage } from './pages/DashboardPage';
+import { PipelinesPage } from './pages/PipelinesPage';
 import { DatasetDetailPage } from './pages/DatasetDetailPage';
 
 function AppRoutes() {
@@ -22,6 +23,7 @@ function AppRoutes() {
     <Routes>
       <Route path="/" element={user ? <Navigate to="/dashboard" replace /> : <LandingPage />} />
       <Route path="/dashboard" element={user ? <DashboardPage /> : <Navigate to="/" replace />} />
+      <Route path="/pipelines" element={user ? <PipelinesPage /> : <Navigate to="/" replace />} />
       <Route
         path="/datasets/:id"
         element={user ? <DatasetDetailPage /> : <Navigate to="/" replace />}
