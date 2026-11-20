@@ -37,21 +37,16 @@ export function generateSklearnPipelineCode({
     .filter((c) => c && !c.isNumeric && c.columnName !== targetColumn)
     .map((c) => c.columnName);
 
-  // Smart fallback features if profile is not yet loaded
-  const fallbackNumeric = ['tenure', 'MonthlyCharges', 'TotalCharges', 'Age', 'Fare'];
-  const fallbackCategorical = ['Contract', 'PaymentMethod', 'InternetService', 'Sex', 'Embarked'];
+  const effectiveNumeric = numericColumns;
+  const effectiveCategorical = categoricalColumns;
 
-  const effectiveNumeric = numericColumns.length > 0 ? numericColumns : fallbackNumeric;
-  const effectiveCategorical = categoricalColumns.length > 0 ? categoricalColumns : fallbackCategorical;
-
-  // Inspect plan for specific operations
+  // Inspect plan for specific operations (no hardcoded column assumptions)
   const ops = Array.isArray(plan?.operations) ? plan.operations : [];
   const droppedColumns =
-    ops.find((op) => op && op.type === 'drop_columns')?.columns ?? ['customerID'];
-  const logScaledColumns =
-    ops
-      .filter((op) => op && op.type === 'scale' && op.strategy === 'log1p')
-      .flatMap((op) => op.columns) ?? ['TotalCharges'];
+    ops.find((op) => op && op.type === 'drop_columns')?.columns ?? [];
+  const logScaledColumns = ops
+    .filter((op) => op && op.type === 'scale' && op.strategy === 'log1p')
+    .flatMap((op) => op.columns);
 
   // Filter out dropped columns from active lists
   const activeNumeric = effectiveNumeric.filter((c) => !droppedColumns.includes(c));

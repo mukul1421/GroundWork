@@ -109,7 +109,7 @@ Only include column names that actually exist in this dataset. Groundwork UI wil
  * Queries ModelService.ListModels to ensure the model exists and supports generateContent.
  */
 async function resolveGeminiModel(apiKey: string, preferredModel?: string): Promise<string> {
-  const desired = preferredModel ?? 'gemini-3.8-flash';
+  const desired = preferredModel ?? 'gemini-2.5-flash';
 
   try {
     const listUrl = `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`;
@@ -123,20 +123,14 @@ async function resolveGeminiModel(apiKey: string, preferredModel?: string): Prom
         .filter((m) => m.supportedGenerationMethods?.includes('generateContent'))
         .map((m) => m.name.replace(/^models\//, ''));
 
-      // If preferred model is in available list, use it
       if (available.includes(desired)) {
         return desired;
       }
 
-      // Prioritized fallback models
       const preferences = [
-        'gemini-3.8-flash',
-        'gemini-3.0-flash',
         'gemini-2.5-flash',
+        'gemini-2.5-pro',
         'gemini-2.0-flash',
-        'gemini-1.5-flash-latest',
-        'gemini-1.5-flash',
-        'gemini-pro',
       ];
 
       for (const p of preferences) {
@@ -163,7 +157,7 @@ async function callGemini(
   history: ChatMessage[],
   userPrompt: string,
 ): Promise<string> {
-  const resolvedModel = await resolveGeminiModel(creds.apiKey, creds.model || 'gemini-3.8-flash');
+  const resolvedModel = await resolveGeminiModel(creds.apiKey, creds.model || 'gemini-2.5-flash');
   const url = `https://generativelanguage.googleapis.com/v1beta/models/${resolvedModel}:generateContent?key=${encodeURIComponent(creds.apiKey)}`;
 
   // Convert chat history to Gemini contents format
@@ -201,8 +195,7 @@ async function callGemini(
     };
     const errMsg = errorBody.error?.message ?? '';
 
-    // Auto-retry if Google explicitly recommended a model in the error message
-    // e.g. "Please update your code to use models/gemini-3.8-flash..."
+    // Auto-retry if API explicitly recommended an updated model alias
     const match = /models\/([a-zA-Z0-9.\-_]+)/.exec(errMsg);
     if (match?.[1] && match[1] !== resolvedModel) {
       const suggestedModel = match[1];
@@ -306,14 +299,14 @@ async function callAzureOpenAI(
   history: ChatMessage[],
   userPrompt: string,
 ): Promise<string> {
-  const endpoint = (creds.azureEndpoint ?? 'https://autoclip-gpt4o-mini-resource.openai.azure.com').replace(/\/+$/, '');
+  const endpoint = (creds.azureEndpoint ?? '').replace(/\/+$/, '');
+  if (!endpoint) {
+    throw new Error('Azure OpenAI endpoint is not configured.');
+  }
   const deployment = creds.azureDeployment ?? creds.model;
   const apiVersion = creds.azureApiVersion ?? '2024-08-01-preview';
 
-  // Candidate models to attempt
-  const candidateDeployments = Array.from(
-    new Set([deployment, 'gpt-5-mini', 'gpt-4o-mini', 'autoclip-gpt4o-mini-resource']),
-  );
+  const candidateDeployments = Array.from(new Set([deployment, 'gpt-4o-mini'])).filter(Boolean);
 
   const messages = [
     { role: 'system', content: systemPrompt },
@@ -324,13 +317,8 @@ async function callAzureOpenAI(
   let lastError = 'Azure OpenAI request failed';
 
   for (const dep of candidateDeployments) {
-    // Both standard Azure deployment endpoints and OpenAI v1 compatibility endpoints
     const candidateUrls = [
-      `/api/azure-openai/openai/v1/chat/completions`,
-      `/api/azure-ai/openai/v1/chat/completions`,
       `${endpoint}/openai/v1/chat/completions`,
-      `/api/azure-openai/openai/deployments/${dep}/chat/completions?api-version=${apiVersion}`,
-      `/api/azure-ai/openai/deployments/${dep}/chat/completions?api-version=${apiVersion}`,
       `${endpoint}/openai/deployments/${dep}/chat/completions?api-version=${apiVersion}`,
     ];
 

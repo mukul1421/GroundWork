@@ -3,25 +3,34 @@ import { render, screen } from '@testing-library/react';
 import { App } from './App';
 
 describe('App', () => {
-  it('renders the Groundwork title and badge', async () => {
+  it('renders the Groundwork landing page headline, glass centerpiece, and primary CTA', async () => {
     render(<App />);
-    expect(await screen.findByText('Groundwork V1 Baseline')).toBeInTheDocument();
-    expect(await screen.findByText('AI Copilot')).toBeInTheDocument();
+    expect(
+      await screen.findByText(/Prepare raw datasets for production ML, right in your browser\./i),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole('button', { name: /Launch Interactive Workspace/i }),
+    ).toBeInTheDocument();
+    const sculpture = await screen.findByRole('img', {
+      name: /3D Groundwork data prism sculpture/i,
+    });
+    expect(sculpture).toBeInTheDocument();
+    expect(sculpture.getAttribute('data-testid')).toMatch(/^groundwork-3d-(stage|mobile)$/);
   });
 
-  it('renders core capabilities', async () => {
+  it('renders primary navigation and engineering pillars', async () => {
     render(<App />);
-    expect(await screen.findByText('Browser-Local DuckDB Execution')).toBeInTheDocument();
-    expect(await screen.findByText('Mandatory User Approval Gate')).toBeInTheDocument();
-    expect(await screen.findByText('Bring Your Own Key (BYOK)')).toBeInTheDocument();
-    expect(await screen.findByText('Immutable Version Control')).toBeInTheDocument();
+    const nav = await screen.findByRole('navigation', { name: 'Primary navigation' });
+    expect(nav).toHaveTextContent('Architecture');
+    expect(nav).toHaveTextContent('Capabilities');
+    expect(nav).toHaveTextContent('Benchmarks');
+    expect(nav).toHaveTextContent('Security');
   });
 
-  it('renders authentication controls', async () => {
+  it('renders workspace access and authentication controls', async () => {
     render(<App />);
-    expect(await screen.findByText('Access Workspace')).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Sign In' })).toBeInTheDocument();
     expect(await screen.findByRole('button', { name: 'Sign Up' })).toBeInTheDocument();
-    expect(await screen.findByText('Continue with Google')).toBeInTheDocument();
+    expect(await screen.findByText('Explore Interactive Sandbox')).toBeInTheDocument();
   });
 });

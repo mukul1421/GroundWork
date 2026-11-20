@@ -1,0 +1,5 @@
+{
+  "name": "Groundwork",
+  "description": "Browser-local AI-assisted data preparation, automated EDA, and leakage-safe Scikit-Learn pipeline platform powered by DuckDB-Wasm.",
+  "requestFramePermissions": []
+}

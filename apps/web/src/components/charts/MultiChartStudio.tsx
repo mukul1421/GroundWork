@@ -2,6 +2,7 @@ import React, { useState, useMemo } from 'react';
 import type { ColumnProfileSummary } from '@/engine/profiling/datasetProfiler';
 import type { CorrelationMatrixResult } from '@/engine/eda/correlationMatrix';
 import { CorrelationHeatmapView } from '@/components/eda/CorrelationHeatmapView';
+import { computeHistogramBins } from '@/engine/localAnalytics';
 
 interface MultiChartStudioProps {
   columns: ColumnProfileSummary[];
@@ -19,64 +20,78 @@ export const MultiChartStudio: React.FC<MultiChartStudioProps> = ({
   loading = false,
 }) => {
   const numericCols = useMemo(() => columns.filter((c) => c.isNumeric), [columns]);
-  const categoricalCols = useMemo(() => columns.filter((c) => !c.isNumeric), [columns]);
-
-  // Primary interactive selection states
-  const [activeNumericCol, setActiveNumericCol] = useState<string>(
-    numericCols[0]?.columnName || '',
-  );
-  const [activeScatterX, setActiveScatterX] = useState<string>(
-    numericCols[0]?.columnName || '',
-  );
-  const [activeScatterY, setActiveScatterY] = useState<string>(
-    numericCols[1]?.columnName || numericCols[0]?.columnName || '',
-  );
-  const [activeCatCol, setActiveCatCol] = useState<string>(
-    categoricalCols[0]?.columnName || '',
+  const categoricalCols = useMemo(
+    () => columns.filter((c) => !c.isNumeric && !c.isPrimaryKeyCandidate),
+    [columns],
   );
 
-  // Filter tab for the dashboard
-  const [dashboardFilter, setDashboardFilter] = useState<'all' | 'distributions' | 'correlations' | 'categories'>('all');
+  // Store user overrides; derive effective values so async column arrivals never leave blank charts
+  const [selectedNumericCol, setSelectedNumericCol] = useState<string>('');
+  const [selectedScatterX, setSelectedScatterX] = useState<string>('');
+  const [selectedScatterY, setSelectedScatterY] = useState<string>('');
+  const [selectedCatCol, setSelectedCatCol] = useState<string>('');
 
-  // Selected column profile summary
+  const effectiveNumericCol = useMemo(() => {
+    if (numericCols.some((c) => c.columnName === selectedNumericCol)) return selectedNumericCol;
+    return numericCols[0]?.columnName ?? '';
+  }, [numericCols, selectedNumericCol]);
+
+  const effectiveScatterX = useMemo(() => {
+    if (numericCols.some((c) => c.columnName === selectedScatterX)) return selectedScatterX;
+    return numericCols[0]?.columnName ?? '';
+  }, [numericCols, selectedScatterX]);
+
+  const effectiveScatterY = useMemo(() => {
+    if (numericCols.some((c) => c.columnName === selectedScatterY)) return selectedScatterY;
+    return numericCols[1]?.columnName ?? numericCols[0]?.columnName ?? '';
+  }, [numericCols, selectedScatterY]);
+
+  const effectiveCatCol = useMemo(() => {
+    if (categoricalCols.some((c) => c.columnName === selectedCatCol)) return selectedCatCol;
+    return categoricalCols[0]?.columnName ?? '';
+  }, [categoricalCols, selectedCatCol]);
+
+  const [dashboardFilter, setDashboardFilter] = useState<
+    'all' | 'distributions' | 'correlations' | 'categories'
+  >('all');
+
   const selectedNumericSummary = useMemo(() => {
-    return numericCols.find((c) => c.columnName === activeNumericCol) ?? numericCols[0];
-  }, [numericCols, activeNumericCol]);
+    return numericCols.find((c) => c.columnName === effectiveNumericCol) ?? numericCols[0];
+  }, [numericCols, effectiveNumericCol]);
 
-  // Categorical frequencies for active categorical column
   const activeCatFrequencies = useMemo(() => {
-    if (!activeCatCol) return [];
+    if (!effectiveCatCol) return [];
     const counts: Record<string, number> = {};
     rows.forEach((r) => {
-      const val = r[activeCatCol];
-      const key = val !== null && val !== undefined ? String(val) : '(Missing)';
+      const val = r[effectiveCatCol];
+      const key = val !== null && val !== undefined && String(val).trim() !== '' ? String(val) : '(Missing)';
       counts[key] = (counts[key] || 0) + 1;
     });
     return Object.entries(counts)
       .map(([label, count]) => ({ label, count }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 10);
-  }, [rows, activeCatCol]);
+  }, [rows, effectiveCatCol]);
 
-  // Scatter points
   const scatterPoints = useMemo(() => {
-    if (!activeScatterX || !activeScatterY) return [];
+    if (!effectiveScatterX || !effectiveScatterY) return [];
     return rows
       .map((r) => ({
-        x: Number(r[activeScatterX]),
-        y: Number(r[activeScatterY]),
+        x: Number(r[effectiveScatterX]),
+        y: Number(r[effectiveScatterY]),
       }))
-      .filter((p) => !isNaN(p.x) && !isNaN(p.y));
-  }, [rows, activeScatterX, activeScatterY]);
+      .filter((p) => Number.isFinite(p.x) && Number.isFinite(p.y));
+  }, [rows, effectiveScatterX, effectiveScatterY]);
 
-  // Target candidate (e.g. Survived)
   const targetCandidate = useMemo(() => {
     return columns.find(
       (c) =>
+        c.columnName.toLowerCase().includes('churn') ||
+        c.columnName.toLowerCase().includes('renewed') ||
+        c.columnName.toLowerCase().includes('returned') ||
         c.columnName.toLowerCase().includes('survived') ||
         c.columnName.toLowerCase().includes('target') ||
-        c.columnName.toLowerCase().includes('label') ||
-        c.columnName.toLowerCase().includes('churn'),
+        c.columnName.toLowerCase().includes('label'),
     );
   }, [columns]);
 
@@ -85,120 +100,92 @@ export const MultiChartStudio: React.FC<MultiChartStudioProps> = ({
     const counts: Record<string, number> = {};
     rows.forEach((r) => {
       const v = r[targetCandidate.columnName];
-      const key = v !== null && v !== undefined ? String(v) : '(Missing)';
+      const key = v !== null && v !== undefined && String(v).trim() !== '' ? String(v) : '(Missing)';
       counts[key] = (counts[key] || 0) + 1;
     });
-    return Object.entries(counts).map(([label, count]) => ({
-      label,
-      count,
-      pct: rows.length > 0 ? (count / rows.length) * 100 : 0,
-    }));
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([label, count]) => ({
+        label,
+        count,
+        pct: rows.length > 0 ? (count / rows.length) * 100 : 0,
+      }));
   }, [rows, targetCandidate]);
 
   return (
     <div className="space-y-6">
-      {/* 1. Header Toolbar with Chart View Filters */}
-      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
+      {/* Header Toolbar */}
+      <div className="flex flex-wrap items-center justify-between gap-4 rounded-2xl border border-[#eaecf0] bg-white p-5">
         <div>
-          <div className="flex items-center gap-2">
-            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-600 text-white text-xs font-bold shadow-xs">
-              📈
-            </span>
-            <h2 className="text-base font-bold text-slate-900">
-              Exploratory Data Analysis Dashboard
-            </h2>
-          </div>
-          <p className="text-xs text-slate-400 mt-1">
-            Multi-panel visual dashboard displaying distributions, relationships, correlations, and outliers simultaneously
+          <h2 className="text-base font-bold text-slate-900">
+            Exploratory Data Analysis
+          </h2>
+          <p className="mt-0.5 text-xs text-slate-500">
+            Interactive distributions, IQR spread, bivariate scatter, and Pearson correlations for {datasetName}
           </p>
         </div>
 
-        {/* Filter Pills */}
-        <div className="flex items-center gap-1.5 rounded-xl bg-slate-100 p-1 border border-slate-200/60 text-xs font-semibold">
-          <button
-            type="button"
-            onClick={() => setDashboardFilter('all')}
-            className={`rounded-lg px-3 py-1.5 transition cursor-pointer ${
-              dashboardFilter === 'all'
-                ? 'bg-white text-blue-600 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            All Visualizations
-          </button>
-          <button
-            type="button"
-            onClick={() => setDashboardFilter('distributions')}
-            className={`rounded-lg px-3 py-1.5 transition cursor-pointer ${
-              dashboardFilter === 'distributions'
-                ? 'bg-white text-blue-600 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Distributions
-          </button>
-          <button
-            type="button"
-            onClick={() => setDashboardFilter('correlations')}
-            className={`rounded-lg px-3 py-1.5 transition cursor-pointer ${
-              dashboardFilter === 'correlations'
-                ? 'bg-white text-blue-600 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Correlation Heatmap
-          </button>
-          <button
-            type="button"
-            onClick={() => setDashboardFilter('categories')}
-            className={`rounded-lg px-3 py-1.5 transition cursor-pointer ${
-              dashboardFilter === 'categories'
-                ? 'bg-white text-blue-600 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900'
-            }`}
-          >
-            Categoricals
-          </button>
+        <div className="flex flex-wrap items-center gap-1 rounded-xl border border-slate-200/80 bg-slate-100 p-1 text-xs font-semibold">
+          {(
+            [
+              { id: 'all', label: 'All Views' },
+              { id: 'distributions', label: 'Distributions' },
+              { id: 'correlations', label: 'Correlations' },
+              { id: 'categories', label: 'Categoricals' },
+            ] as const
+          ).map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setDashboardFilter(item.id)}
+              className={`cursor-pointer rounded-lg px-3 py-1.5 whitespace-nowrap transition ${
+                dashboardFilter === item.id
+                  ? 'bg-white text-[#3b5bf6] shadow-xs'
+                  : 'text-slate-600 hover:text-slate-900'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
         </div>
       </div>
 
-      {/* 2. Top Grid: Target Distribution & Correlation Heatmap */}
+      {/* Top Grid: Target Distribution & Correlation Heatmap */}
       {(dashboardFilter === 'all' || dashboardFilter === 'correlations') && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-          {/* Target Distribution Card (4 cols) */}
           {targetCandidate && (
-            <div className="lg:col-span-4 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+            <div className="flex flex-col justify-between rounded-2xl border border-[#eaecf0] bg-white p-5 lg:col-span-4">
               <div>
-                <div className="flex items-center justify-between mb-3 border-b border-slate-100 pb-2.5">
-                  <div className="flex items-center gap-1.5">
-                    <span className="text-xs font-bold text-slate-800">🎯 Target Distribution</span>
-                    <span className="rounded bg-blue-50 px-1.5 py-0.5 text-[10px] font-bold text-blue-700">
+                <div className="mb-3 flex items-center justify-between border-b border-slate-100 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-bold text-slate-900">Target Balance</span>
+                    <span className="font-mono text-[11px] font-semibold text-[#3b5bf6]">
                       {targetCandidate.columnName}
                     </span>
                   </div>
-                  <span className="text-[10px] uppercase font-bold text-slate-400">Class Balance</span>
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-slate-400">
+                    Classes
+                  </span>
                 </div>
-                <p className="text-xs text-slate-400 mb-4 leading-relaxed">
-                  Outcome ratio for supervised modeling in {datasetName}. Check for severe class imbalance.
+                <p className="mb-4 text-xs leading-relaxed text-slate-500">
+                  Class balance for supervised splits in {datasetName}. Inspect minority class ratios before splitting.
                 </p>
 
                 <div className="space-y-3">
-                  {targetFrequencies.map((tf) => (
+                  {targetFrequencies.map((tf, idx) => (
                     <div key={tf.label} className="space-y-1">
                       <div className="flex items-center justify-between text-xs">
-                        <span className="font-bold text-slate-700">
-                          Class {tf.label === '1' ? '1 (Positive / Survived)' : tf.label === '0' ? '0 (Negative)' : tf.label}
+                        <span className="font-mono font-semibold text-slate-800">
+                          Value: {tf.label}
                         </span>
-                        <span className="font-mono text-slate-500 font-semibold">
-                          {tf.count} rows ({tf.pct.toFixed(1)}%)
+                        <span className="font-mono font-semibold text-slate-500 tabular-nums">
+                          {tf.count.toLocaleString()} ({tf.pct.toFixed(1)}%)
                         </span>
                       </div>
-                      <div className="h-4 w-full bg-slate-100 rounded-md overflow-hidden">
+                      <div className="h-3.5 w-full overflow-hidden rounded-md bg-slate-100">
                         <div
-                          className={`h-full rounded-md transition-all ${
-                            tf.label === '1' ? 'bg-blue-600' : 'bg-slate-400'
-                          }`}
-                          style={{ width: `${tf.pct}%` }}
+                          className={`h-full rounded-md ${idx === 0 ? 'bg-[#3b5bf6]' : 'bg-slate-400'}`}
+                          style={{ width: `${Math.max(2, tf.pct)}%` }}
                         />
                       </div>
                     </div>
@@ -206,39 +193,38 @@ export const MultiChartStudio: React.FC<MultiChartStudioProps> = ({
                 </div>
               </div>
 
-              <div className="mt-4 pt-3 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-400">
-                <span>Total Samples: {rows.length}</span>
-                <span className="text-emerald-600 font-bold">✓ Stratification Recommended</span>
+              <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-[11px] text-slate-500">
+                <span className="font-mono tabular-nums">{rows.length.toLocaleString()} sampled rows</span>
+                <span className="font-semibold text-emerald-700">Stratified split ready</span>
               </div>
             </div>
           )}
 
-          {/* Correlation Matrix Heatmap (8 cols) */}
           <div className={targetCandidate ? 'lg:col-span-8' : 'lg:col-span-12'}>
             <CorrelationHeatmapView data={correlationData} loading={loading} />
           </div>
         </div>
       )}
 
-      {/* 3. Middle Grid: Numerical Feature Histogram + Outlier Boxplot Side-by-Side */}
+      {/* Middle Grid: Histogram + Boxplot */}
       {(dashboardFilter === 'all' || dashboardFilter === 'distributions') && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-          {/* Histogram Card (7 cols) */}
-          <div className="lg:col-span-7 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
-            <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
+          <div className="rounded-2xl border border-[#eaecf0] bg-white p-5 lg:col-span-7">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
                 <span className="text-sm font-bold text-slate-900">Feature Distribution</span>
-                <span className="text-xs text-slate-400">· Density & Frequency Bins</span>
+                <span className="text-xs text-slate-400">· 10-bin frequency histogram</span>
               </div>
 
-              {/* Column Switcher */}
               <div className="flex items-center gap-2">
-                <label htmlFor="num-hist-select" className="text-xs font-semibold text-slate-500">Feature:</label>
+                <label htmlFor="num-hist-select" className="text-xs font-semibold text-slate-500">
+                  Feature:
+                </label>
                 <select
                   id="num-hist-select"
-                  value={activeNumericCol}
-                  onChange={(e) => setActiveNumericCol(e.target.value)}
-                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-800 focus:outline-none"
+                  value={effectiveNumericCol}
+                  onChange={(e) => setSelectedNumericCol(e.target.value)}
+                  className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 font-mono text-xs font-semibold text-slate-800 focus:border-[#3b5bf6] focus:outline-none"
                 >
                   {numericCols.map((c) => (
                     <option key={c.columnName} value={c.columnName}>
@@ -256,18 +242,18 @@ export const MultiChartStudio: React.FC<MultiChartStudioProps> = ({
             )}
           </div>
 
-          {/* Outlier Boxplot Card (5 cols) */}
-          <div className="lg:col-span-5 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+          <div className="flex flex-col justify-between rounded-2xl border border-[#eaecf0] bg-white p-5 lg:col-span-5">
             <div>
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
+              <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-3">
                 <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-slate-900">Spread & Outliers</span>
-                  <span className="text-xs text-slate-400">· 1.5× IQR Boundary</span>
+                  <span className="text-sm font-bold text-slate-900">Spread &amp; Outliers</span>
+                  <span className="text-xs text-slate-400">· 1.5× IQR</span>
                 </div>
-                <span className="rounded-full bg-rose-50 px-2 py-0.5 text-[10px] font-bold text-rose-600 border border-rose-100">
+                <span className="font-mono text-xs font-bold text-rose-600 tabular-nums">
                   {selectedNumericSummary && 'outlierCount' in selectedNumericSummary.stats
                     ? selectedNumericSummary.stats.outlierCount
-                    : 0} Outliers
+                    : 0}{' '}
+                  outliers
                 </span>
               </div>
 
@@ -278,33 +264,37 @@ export const MultiChartStudio: React.FC<MultiChartStudioProps> = ({
               )}
             </div>
 
-            <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-between">
-              <span>Whiskers extend to min/max within 1.5× IQR</span>
-              <span className="font-semibold text-blue-600">Hover for quartiles</span>
+            <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-[11px] text-slate-500">
+              <span>Tukey whiskers from Q1 to Q3</span>
+              <span className="font-mono font-semibold text-slate-700">
+                {selectedNumericSummary?.columnName ?? '—'}
+              </span>
             </div>
           </div>
         </div>
       )}
 
-      {/* 4. Bottom Grid: Bivariate Scatter (2D) + Categorical Frequency Distribution */}
-      {(dashboardFilter === 'all' || dashboardFilter === 'categories' || dashboardFilter === 'distributions') && (
+      {/* Bottom Grid: Bivariate Scatter + Categorical Frequency */}
+      {(dashboardFilter === 'all' ||
+        dashboardFilter === 'categories' ||
+        dashboardFilter === 'distributions') && (
         <div className="grid grid-cols-1 gap-6 lg:grid-cols-12">
-          {/* Bivariate 2D Scatter Plot (7 cols) */}
-          <div className="lg:col-span-7 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs">
-            <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3 mb-4">
+          <div className="rounded-2xl border border-[#eaecf0] bg-white p-5 lg:col-span-7">
+            <div className="mb-4 flex flex-wrap items-center justify-between gap-2 border-b border-slate-100 pb-3">
               <div className="flex items-center gap-2">
-                <span className="text-sm font-bold text-slate-900">Bivariate Scatter & Interaction</span>
-                <span className="text-xs text-slate-400">· 2D Correlation</span>
+                <span className="text-sm font-bold text-slate-900">Bivariate Scatter</span>
+                <span className="text-xs text-slate-400">· 2D numeric interaction</span>
               </div>
 
-              {/* X and Y Selectors */}
-              <div className="flex items-center gap-2">
-                <label htmlFor="scatter-x-select" className="text-xs text-slate-400">X:</label>
+              <div className="flex flex-wrap items-center gap-2">
+                <label htmlFor="scatter-x-select" className="text-xs font-medium text-slate-500">
+                  X:
+                </label>
                 <select
                   id="scatter-x-select"
-                  value={activeScatterX}
-                  onChange={(e) => setActiveScatterX(e.target.value)}
-                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-800"
+                  value={effectiveScatterX}
+                  onChange={(e) => setSelectedScatterX(e.target.value)}
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 font-mono text-xs font-semibold text-slate-800"
                 >
                   {numericCols.map((c) => (
                     <option key={c.columnName} value={c.columnName}>
@@ -313,12 +303,14 @@ export const MultiChartStudio: React.FC<MultiChartStudioProps> = ({
                   ))}
                 </select>
 
-                <label htmlFor="scatter-y-select" className="text-xs text-slate-400 ml-1">Y:</label>
+                <label htmlFor="scatter-y-select" className="ml-1 text-xs font-medium text-slate-500">
+                  Y:
+                </label>
                 <select
                   id="scatter-y-select"
-                  value={activeScatterY}
-                  onChange={(e) => setActiveScatterY(e.target.value)}
-                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 text-xs font-semibold text-slate-800"
+                  value={effectiveScatterY}
+                  onChange={(e) => setSelectedScatterY(e.target.value)}
+                  className="rounded-lg border border-slate-200 bg-white px-2 py-1 font-mono text-xs font-semibold text-slate-800"
                 >
                   {numericCols.map((c) => (
                     <option key={c.columnName} value={c.columnName}>
@@ -330,25 +322,23 @@ export const MultiChartStudio: React.FC<MultiChartStudioProps> = ({
             </div>
 
             <MultiScatterRenderer
-              xCol={activeScatterX}
-              yCol={activeScatterY}
+              xCol={effectiveScatterX}
+              yCol={effectiveScatterY}
               points={scatterPoints}
             />
           </div>
 
-          {/* Categorical Breakdown Card (5 cols) */}
-          <div className="lg:col-span-5 rounded-2xl border border-slate-200/80 bg-white p-5 shadow-xs flex flex-col justify-between">
+          <div className="flex flex-col justify-between rounded-2xl border border-[#eaecf0] bg-white p-5 lg:col-span-5">
             <div>
-              <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
-                <div className="flex items-center gap-2">
-                  <span className="text-sm font-bold text-slate-900">Categorical Distribution</span>
-                </div>
+              <div className="mb-4 flex items-center justify-between border-b border-slate-100 pb-3">
+                <span className="text-sm font-bold text-slate-900">Categorical Distribution</span>
 
                 {categoricalCols.length > 0 && (
                   <select
-                    value={activeCatCol}
-                    onChange={(e) => setActiveCatCol(e.target.value)}
-                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-bold text-slate-800"
+                    aria-label="Categorical feature"
+                    value={effectiveCatCol}
+                    onChange={(e) => setSelectedCatCol(e.target.value)}
+                    className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 font-mono text-xs font-semibold text-slate-800"
                   >
                     {categoricalCols.map((c) => (
                       <option key={c.columnName} value={c.columnName}>
@@ -367,16 +357,16 @@ export const MultiChartStudio: React.FC<MultiChartStudioProps> = ({
                     return (
                       <div key={cat.label} className="space-y-1">
                         <div className="flex items-center justify-between text-xs">
-                          <span className="font-semibold text-slate-700 truncate max-w-[180px]">
+                          <span className="max-w-[180px] truncate font-medium text-slate-700">
                             {cat.label}
                           </span>
-                          <span className="font-mono text-slate-500 font-bold">
-                            {cat.count} rows
+                          <span className="font-mono font-semibold text-slate-600 tabular-nums">
+                            {cat.count.toLocaleString()} rows
                           </span>
                         </div>
-                        <div className="h-3.5 w-full bg-slate-100 rounded-md overflow-hidden">
+                        <div className="h-3 w-full overflow-hidden rounded-md bg-slate-100">
                           <div
-                            className="h-full bg-indigo-500 rounded-md transition-all"
+                            className="h-full rounded-md bg-[#3b5bf6]"
                             style={{ width: `${Math.max(pct, 2)}%` }}
                           />
                         </div>
@@ -391,9 +381,11 @@ export const MultiChartStudio: React.FC<MultiChartStudioProps> = ({
               )}
             </div>
 
-            <div className="mt-4 pt-3 border-t border-slate-100 text-[11px] text-slate-400 flex items-center justify-between">
-              <span>Cardinality: {activeCatFrequencies.length} unique values</span>
-              <span className="text-blue-600 font-semibold">One-Hot Encoding Ready</span>
+            <div className="mt-4 flex items-center justify-between border-t border-slate-100 pt-3 text-[11px] text-slate-500">
+              <span className="font-mono tabular-nums">
+                Cardinality: {activeCatFrequencies.length} unique values
+              </span>
+              <span className="font-semibold text-[#3b5bf6]">One-hot ready</span>
             </div>
           </div>
         </div>
@@ -410,76 +402,86 @@ const MultiHistogramRenderer: React.FC<{
 }> = ({ column, rows }) => {
   if (!column.isNumeric || !('min' in column.stats)) return null;
 
-  const { min, max, mean, median, stddev, outlierCount } = column.stats;
-  const minVal = min ?? 0;
-  const maxVal = max ?? 100;
+  const { mean, median, stddev, outlierCount } = column.stats;
+  const bins = computeHistogramBins(rows, column.columnName, 10);
 
-  const values = rows
-    .map((r) => Number(r[column.columnName]))
-    .filter((v) => !isNaN(v));
-
-  const binCount = 10;
-  const step = (maxVal - minVal) / binCount || 1;
-  const bins: { label: string; count: number }[] = [];
-  for (let i = 0; i < binCount; i++) {
-    const low = minVal + i * step;
-    const high = low + step;
-    const count = values.filter((v) => v >= low && (i === binCount - 1 ? v <= high : v < high)).length;
-    bins.push({ label: `${Math.round(low)}`, count: count || 1 });
+  if (bins.length === 0) {
+    return (
+      <div className="py-10 text-center text-xs text-slate-400">
+        No finite values available for {column.columnName}.
+      </div>
+    );
   }
 
   const maxCount = Math.max(...bins.map((b) => b.count), 1);
   const width = 600;
   const height = 200;
-  const padding = { top: 20, right: 30, bottom: 35, left: 45 };
+  const padding = { top: 20, right: 24, bottom: 35, left: 36 };
   const chartWidth = width - padding.left - padding.right;
   const chartHeight = height - padding.top - padding.bottom;
-  const barWidth = (chartWidth / binCount) * 0.85;
+  const barWidth = (chartWidth / bins.length) * 0.82;
 
   return (
     <div className="space-y-3">
-      {/* Quick Stats Badges */}
       <div className="grid grid-cols-4 gap-2 text-center text-xs">
-        <div className="rounded-lg bg-slate-50 p-2 border border-slate-200/60">
-          <div className="text-[10px] text-slate-400 font-semibold uppercase">Mean</div>
-          <div className="font-bold text-slate-800">{mean?.toFixed(1) ?? 'N/A'}</div>
+        <div className="rounded-lg border border-slate-200/70 bg-slate-50 p-2">
+          <div className="text-[10px] font-semibold uppercase text-slate-500">Mean</div>
+          <div className="font-mono font-bold text-slate-900 tabular-nums">
+            {mean?.toFixed(1) ?? 'N/A'}
+          </div>
         </div>
-        <div className="rounded-lg bg-slate-50 p-2 border border-slate-200/60">
-          <div className="text-[10px] text-slate-400 font-semibold uppercase">Median</div>
-          <div className="font-bold text-blue-600">{median?.toFixed(1) ?? 'N/A'}</div>
+        <div className="rounded-lg border border-slate-200/70 bg-slate-50 p-2">
+          <div className="text-[10px] font-semibold uppercase text-slate-500">Median</div>
+          <div className="font-mono font-bold text-[#3b5bf6] tabular-nums">
+            {median?.toFixed(1) ?? 'N/A'}
+          </div>
         </div>
-        <div className="rounded-lg bg-slate-50 p-2 border border-slate-200/60">
-          <div className="text-[10px] text-slate-400 font-semibold uppercase">Std Dev</div>
-          <div className="font-bold text-slate-800">{stddev?.toFixed(1) ?? 'N/A'}</div>
+        <div className="rounded-lg border border-slate-200/70 bg-slate-50 p-2">
+          <div className="text-[10px] font-semibold uppercase text-slate-500">Std Dev</div>
+          <div className="font-mono font-bold text-slate-900 tabular-nums">
+            {stddev?.toFixed(1) ?? 'N/A'}
+          </div>
         </div>
-        <div className="rounded-lg bg-slate-50 p-2 border border-slate-200/60">
-          <div className="text-[10px] text-slate-400 font-semibold uppercase">Outliers</div>
-          <div className="font-bold text-rose-600">{outlierCount}</div>
+        <div className="rounded-lg border border-slate-200/70 bg-slate-50 p-2">
+          <div className="text-[10px] font-semibold uppercase text-slate-500">Outliers</div>
+          <div className="font-mono font-bold text-rose-600 tabular-nums">{outlierCount}</div>
         </div>
       </div>
 
-      <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3">
-        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
-          {/* Bars */}
+      <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-3">
+        <svg viewBox={`0 0 ${width} ${height}`} className="h-auto w-full" role="img" aria-label={`Histogram of ${column.columnName}`}>
+          <line
+            x1={padding.left}
+            y1={padding.top + chartHeight}
+            x2={padding.left + chartWidth}
+            y2={padding.top + chartHeight}
+            stroke="#cbd5e1"
+            strokeWidth={1}
+          />
           {bins.map((b, i) => {
-            const x = padding.left + i * (chartWidth / binCount) + (chartWidth / binCount - barWidth) / 2;
-            const barH = (b.count / maxCount) * chartHeight;
+            const x =
+              padding.left +
+              i * (chartWidth / bins.length) +
+              (chartWidth / bins.length - barWidth) / 2;
+            const barH = b.count === 0 ? 0 : Math.max(2, (b.count / maxCount) * chartHeight);
             const y = padding.top + chartHeight - barH;
             return (
-              <g key={b.label}>
+              <g key={`${b.rangeLabel}-${i}`}>
                 <rect
                   x={x}
                   y={y}
                   width={barWidth}
                   height={barH}
                   rx={2}
-                  className="fill-blue-500 hover:fill-blue-600 transition"
-                />
+                  className="fill-[#3b5bf6]/80 transition-colors hover:fill-[#3b5bf6]"
+                >
+                  <title>{`${b.rangeLabel}: ${b.count} rows`}</title>
+                </rect>
                 <text
                   x={x + barWidth / 2}
-                  y={padding.top + chartHeight + 14}
+                  y={padding.top + chartHeight + 16}
                   textAnchor="middle"
-                  className="text-[9px] fill-slate-400 font-mono"
+                  className="fill-slate-500 font-mono text-[9px]"
                 >
                   {b.label}
                 </text>
@@ -502,11 +504,10 @@ const MultiBoxPlotRenderer: React.FC<{
   const medVal = column.stats.median ?? (minVal + maxVal) / 2;
   const q25Val = column.stats.q25 ?? minVal + (maxVal - minVal) * 0.25;
   const q75Val = column.stats.q75 ?? minVal + (maxVal - minVal) * 0.75;
-  const outlierCount = column.stats.outlierCount ?? 0;
 
   const width = 450;
-  const height = 150;
-  const padding = { left: 45, right: 45, top: 30, bottom: 35 };
+  const height = 148;
+  const padding = { left: 45, right: 45, top: 28, bottom: 34 };
   const plotWidth = width - padding.left - padding.right;
 
   const range = maxVal - minVal || 1;
@@ -517,49 +518,44 @@ const MultiBoxPlotRenderer: React.FC<{
   const xMed = getX(medVal);
   const xQ75 = getX(q75Val);
   const xMax = getX(maxVal);
-  const boxY = 45;
-  const boxHeight = 45;
+  const boxY = 44;
+  const boxHeight = 44;
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between text-xs text-slate-600 bg-slate-50 p-2.5 rounded-xl border border-slate-200/60">
-        <div><strong>Min:</strong> {minVal.toFixed(1)}</div>
-        <div><strong>Q1:</strong> {q25Val.toFixed(1)}</div>
-        <div className="text-blue-600 font-bold"><strong>Med:</strong> {medVal.toFixed(1)}</div>
-        <div><strong>Q3:</strong> {q75Val.toFixed(1)}</div>
-        <div><strong>Max:</strong> {maxVal.toFixed(1)}</div>
-        <div><strong className="text-rose-600 font-bold">Outliers:</strong> {outlierCount}</div>
+      <div className="flex flex-wrap items-center justify-between gap-2 rounded-xl border border-slate-200/70 bg-slate-50 px-3 py-2 font-mono text-[11px] text-slate-600 tabular-nums">
+        <span>Min {minVal.toFixed(1)}</span>
+        <span>Q1 {q25Val.toFixed(1)}</span>
+        <span className="font-bold text-[#3b5bf6]">Med {medVal.toFixed(1)}</span>
+        <span>Q3 {q75Val.toFixed(1)}</span>
+        <span>Max {maxVal.toFixed(1)}</span>
       </div>
 
-      <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3">
-        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
-          {/* Whisker */}
+      <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-3">
+        <svg viewBox={`0 0 ${width} ${height}`} className="h-auto w-full" role="img" aria-label={`Boxplot of ${column.columnName}`}>
           <line x1={xMin} y1={boxY + boxHeight / 2} x2={xMax} y2={boxY + boxHeight / 2} stroke="#94a3b8" strokeWidth={2} />
           <line x1={xMin} y1={boxY + 8} x2={xMin} y2={boxY + boxHeight - 8} stroke="#64748b" strokeWidth={2} />
           <line x1={xMax} y1={boxY + 8} x2={xMax} y2={boxY + boxHeight - 8} stroke="#64748b" strokeWidth={2} />
 
-          {/* Box */}
           <rect
             x={xQ25}
             y={boxY}
             width={Math.max(xQ75 - xQ25, 3)}
             height={boxHeight}
             fill="#dbeafe"
-            stroke="#2563eb"
+            stroke="#3b5bf6"
             strokeWidth={2}
             rx={3}
           />
-          {/* Median */}
           <line x1={xMed} y1={boxY} x2={xMed} y2={boxY + boxHeight} stroke="#1d4ed8" strokeWidth={3} />
 
-          {/* Labels */}
-          <text x={xMin} y={boxY + boxHeight + 18} textAnchor="middle" className="text-[9px] fill-slate-400 font-mono">
+          <text x={xMin} y={boxY + boxHeight + 18} textAnchor="middle" className="fill-slate-500 font-mono text-[9px]">
             {minVal.toFixed(1)}
           </text>
-          <text x={xMed} y={boxY - 8} textAnchor="middle" className="text-[9px] fill-blue-600 font-bold font-mono">
+          <text x={xMed} y={boxY - 8} textAnchor="middle" className="fill-[#3b5bf6] font-mono text-[9px] font-bold">
             {medVal.toFixed(1)}
           </text>
-          <text x={xMax} y={boxY + boxHeight + 18} textAnchor="middle" className="text-[9px] fill-slate-400 font-mono">
+          <text x={xMax} y={boxY + boxHeight + 18} textAnchor="middle" className="fill-slate-500 font-mono text-[9px]">
             {maxVal.toFixed(1)}
           </text>
         </svg>
@@ -574,7 +570,11 @@ const MultiScatterRenderer: React.FC<{
   points: { x: number; y: number }[];
 }> = ({ xCol, yCol, points }) => {
   if (points.length === 0) {
-    return <div className="py-12 text-center text-xs text-slate-400">No data points for {xCol} vs {yCol}.</div>;
+    return (
+      <div className="py-12 text-center text-xs text-slate-400">
+        No numeric pairs available for {xCol || 'X'} vs {yCol || 'Y'}.
+      </div>
+    );
   }
 
   const xVals = points.map((p) => p.x);
@@ -586,7 +586,7 @@ const MultiScatterRenderer: React.FC<{
 
   const width = 600;
   const height = 240;
-  const padding = { top: 20, right: 25, bottom: 40, left: 45 };
+  const padding = { top: 20, right: 25, bottom: 40, left: 48 };
   const plotWidth = width - padding.left - padding.right;
   const plotHeight = height - padding.top - padding.bottom;
 
@@ -598,36 +598,60 @@ const MultiScatterRenderer: React.FC<{
 
   return (
     <div className="space-y-2">
-      <div className="flex items-center justify-between text-xs text-slate-400">
-        <span>{points.length} points plotted</span>
-        <span>X: [{minX.toFixed(1)}..{maxX.toFixed(1)}] | Y: [{minY.toFixed(1)}..{maxY.toFixed(1)}]</span>
+      <div className="flex flex-wrap items-center justify-between gap-2 font-mono text-[11px] text-slate-500 tabular-nums">
+        <span>{points.length.toLocaleString()} points</span>
+        <span>
+          X [{minX.toFixed(1)}..{maxX.toFixed(1)}] · Y [{minY.toFixed(1)}..{maxY.toFixed(1)}]
+        </span>
       </div>
 
-      <div className="rounded-xl border border-slate-100 bg-slate-50/50 p-3">
-        <svg viewBox={`0 0 ${width} ${height}`} className="w-full h-auto">
-          {/* Axes */}
-          <line x1={padding.left} y1={padding.top} x2={padding.left} y2={padding.top + plotHeight} stroke="#cbd5e1" strokeWidth={1.5} />
-          <line x1={padding.left} y1={padding.top + plotHeight} x2={padding.left + plotWidth} y2={padding.top + plotHeight} stroke="#cbd5e1" strokeWidth={1.5} />
+      <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-3">
+        <svg viewBox={`0 0 ${width} ${height}`} className="h-auto w-full" role="img" aria-label={`Scatter plot of ${xCol} vs ${yCol}`}>
+          <line
+            x1={padding.left}
+            y1={padding.top}
+            x2={padding.left}
+            y2={padding.top + plotHeight}
+            stroke="#cbd5e1"
+            strokeWidth={1.5}
+          />
+          <line
+            x1={padding.left}
+            y1={padding.top + plotHeight}
+            x2={padding.left + plotWidth}
+            y2={padding.top + plotHeight}
+            stroke="#cbd5e1"
+            strokeWidth={1.5}
+          />
 
-          {/* Points */}
           {points.map((p, idx) => (
             <circle
               key={idx}
               cx={getX(p.x)}
               cy={getY(p.y)}
               r={3}
-              fill="#3b82f6"
-              fillOpacity={0.65}
+              fill="#3b5bf6"
+              fillOpacity={0.62}
               stroke="#1d4ed8"
               strokeWidth={0.5}
             />
           ))}
 
-          {/* Labels */}
-          <text x={padding.left + plotWidth / 2} y={padding.top + plotHeight + 30} textAnchor="middle" className="text-[10px] font-bold fill-slate-700">
+          <text
+            x={padding.left + plotWidth / 2}
+            y={padding.top + plotHeight + 30}
+            textAnchor="middle"
+            className="fill-slate-700 font-mono text-[10px] font-semibold"
+          >
             {xCol}
           </text>
-          <text x={-padding.top - plotHeight / 2} y={15} transform="rotate(-90)" textAnchor="middle" className="text-[10px] font-bold fill-slate-700">
+          <text
+            x={-padding.top - plotHeight / 2}
+            y={15}
+            transform="rotate(-90)"
+            textAnchor="middle"
+            className="fill-slate-700 font-mono text-[10px] font-semibold"
+          >
             {yCol}
           </text>
         </svg>

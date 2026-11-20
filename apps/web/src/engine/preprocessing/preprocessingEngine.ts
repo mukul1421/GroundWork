@@ -1,5 +1,9 @@
 import type { AsyncDuckDBConnection, AsyncDuckDB } from '@duckdb/duckdb-wasm';
-import type { Table } from 'apache-arrow';
+
+interface ArrowTableLike {
+  getChild(name: string): { get(index: number): unknown } | null;
+  getChildAt(index: number): { get(index: number): unknown } | null;
+}
 
 export type PreprocessingOperationType =
   | 'impute'
@@ -70,7 +74,7 @@ export interface PreprocessingResult {
   exportedBuffer: Uint8Array;
 }
 
-function getScalar(table: Table, nameOrIndex: string | number, rowIndex = 0): unknown {
+function getScalar(table: ArrowTableLike, nameOrIndex: string | number, rowIndex = 0): unknown {
   try {
     const col =
       typeof nameOrIndex === 'string'

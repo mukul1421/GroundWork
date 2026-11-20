@@ -9,7 +9,10 @@ export interface AuthContextType {
   workspaces: Workspace[];
   activeWorkspace: Workspace | null;
   loading: boolean;
+  isDemoMode: boolean;
+  isSupabaseConfigured: boolean;
   setActiveWorkspace: (ws: Workspace) => void;
+  enterDemoMode: () => void;
   signInWithEmail: (email: string, password: string) => Promise<{ error: AuthError | null }>;
   signUpWithEmail: (email: string, password: string) => Promise<{ error: AuthError | null }>;
   signInWithGoogle: () => Promise<{ error: AuthError | null }>;

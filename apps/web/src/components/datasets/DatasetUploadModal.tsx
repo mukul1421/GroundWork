@@ -1,6 +1,7 @@
 import { useState, useRef, type ChangeEvent, type DragEvent } from 'react';
 import { useAuth } from '@/integrations/supabase';
 import { uploadDataset } from '@/storage/datasetStorage';
+import { uploadLocalDataset } from '@/storage/localWorkspaceStore';
 import { parsePreview, type ParsedPreview } from '@/storage/fileParser';
 import { DatasetPreviewTable } from './DatasetPreviewTable';
 import type { Dataset } from '@/types/database';
@@ -12,7 +13,7 @@ interface DatasetUploadModalProps {
 }
 
 export function DatasetUploadModal({ isOpen, onClose, onUploadSuccess }: DatasetUploadModalProps) {
-  const { user, activeWorkspace } = useAuth();
+  const { user, activeWorkspace, isDemoMode } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [file, setFile] = useState<File | null>(null);
@@ -25,10 +26,18 @@ export function DatasetUploadModal({ isOpen, onClose, onUploadSuccess }: Dataset
 
   if (!isOpen) return null;
 
+  const resetAndClose = () => {
+    setFile(null);
+    setDatasetName('');
+    setPreview(null);
+    setError(null);
+    onClose();
+  };
+
   const handleFileSelect = async (selectedFile: File) => {
     setError(null);
     setFile(selectedFile);
-    setDatasetName(selectedFile.name.replace(/\.[^/.]+$/, ''));
+    setDatasetName(selectedFile.name);
     setLoadingPreview(true);
 
     try {
@@ -60,20 +69,37 @@ export function DatasetUploadModal({ isOpen, onClose, onUploadSuccess }: Dataset
   };
 
   const handleUpload = async () => {
-    if (!file || !user || !activeWorkspace) return;
+    if (!file) return;
+    if (!datasetName.trim()) {
+      setError('Please enter a dataset name before saving.');
+      return;
+    }
+
     setError(null);
     setUploading(true);
 
     try {
+      if (isDemoMode) {
+        const created = await uploadLocalDataset(file, datasetName.trim());
+        onUploadSuccess(created);
+        resetAndClose();
+        return;
+      }
+
+      if (!user || !activeWorkspace) {
+        setError('No active workspace selected.');
+        return;
+      }
+
       const result = await uploadDataset({
         file,
         workspaceId: activeWorkspace.id,
         userId: user.id,
-        customName: datasetName,
+        customName: datasetName.trim(),
       });
 
       onUploadSuccess(result.dataset);
-      onClose();
+      resetAndClose();
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Upload failed.');
     } finally {
@@ -82,36 +108,44 @@ export function DatasetUploadModal({ isOpen, onClose, onUploadSuccess }: Dataset
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 p-4 backdrop-blur-sm">
-      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-slate-700 bg-slate-900 shadow-2xl">
+    <div
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="upload-modal-title"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4"
+    >
+      <div className="flex max-h-[90vh] w-full max-w-2xl flex-col rounded-xl border border-slate-200 bg-white shadow-xl">
         {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-800 px-6 py-4">
+        <div className="flex items-center justify-between border-b border-slate-200 px-6 py-4">
           <div>
-            <h2 className="text-base font-semibold text-white">Upload Dataset</h2>
-            <p className="text-xs text-slate-400">
-              Target Workspace:{' '}
-              <span className="font-medium text-sky-400">{activeWorkspace?.name}</span>
+            <h2 id="upload-modal-title" className="font-display text-base font-bold text-slate-900">
+              Upload Dataset
+            </h2>
+            <p className="text-xs text-slate-500 mt-0.5">
+              Workspace: <span className="font-medium text-slate-700">{activeWorkspace?.name ?? 'Local Workspace'}</span>
             </p>
           </div>
           <button
             type="button"
-            onClick={onClose}
-            className="rounded-lg p-1 text-slate-400 hover:bg-slate-800 hover:text-white"
+            aria-label="Close upload dialog"
+            onClick={resetAndClose}
+            className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-700 cursor-pointer"
           >
-            ✕
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
           </button>
         </div>
 
         {/* Body */}
         <div className="flex-1 space-y-5 overflow-y-auto p-6">
           {error && (
-            <div className="rounded-md border border-rose-800/60 bg-rose-950/40 p-3 text-xs text-rose-300">
+            <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 p-3 text-xs text-rose-700">
               {error}
             </div>
           )}
 
           {!file ? (
-            /* Drag and Drop Zone */
             <div
               onDragOver={(e) => {
                 e.preventDefault();
@@ -119,11 +153,10 @@ export function DatasetUploadModal({ isOpen, onClose, onUploadSuccess }: Dataset
               }}
               onDragLeave={() => setIsDragOver(false)}
               onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              className={`flex cursor-pointer flex-col items-center justify-center rounded-xl border-2 border-dashed p-10 text-center transition ${
+              className={`rounded-xl border-2 border-dashed p-10 text-center transition ${
                 isDragOver
-                  ? 'border-sky-500 bg-sky-500/10'
-                  : 'border-slate-700 bg-slate-800/30 hover:border-slate-600 hover:bg-slate-800/60'
+                  ? 'border-[#3b63f6] bg-blue-50/60'
+                  : 'border-slate-300 bg-slate-50/70 hover:border-[#3b63f6]'
               }`}
             >
               <input
@@ -133,37 +166,38 @@ export function DatasetUploadModal({ isOpen, onClose, onUploadSuccess }: Dataset
                 onChange={handleInputChange}
                 className="hidden"
               />
-              <div className="flex h-12 w-12 items-center justify-center rounded-full bg-sky-500/10 text-sky-400">
-                📁
-              </div>
-              <p className="mt-3 text-sm font-medium text-slate-200">
-                Click to browse or drag and drop your file here
-              </p>
-              <p className="mt-1 text-xs text-slate-400">
-                Supported formats: <span className="font-semibold text-slate-300">CSV</span>,{' '}
-                <span className="font-semibold text-slate-300">XLSX</span>,{' '}
-                <span className="font-semibold text-slate-300">JSON</span>,{' '}
-                <span className="font-semibold text-slate-300">JSONL</span>
-              </p>
-              <div className="mt-4 rounded-full bg-slate-800 px-3 py-1 text-[11px] text-slate-400">
-                Max file size: 40 MB
-              </div>
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full flex flex-col items-center justify-center cursor-pointer"
+              >
+                <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-blue-50 text-[#3b63f6]">
+                  <svg className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={1.8}
+                      d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                    />
+                  </svg>
+                </div>
+                <span className="mt-3 text-sm font-semibold text-slate-900">
+                  Click to browse or drag and drop a dataset file
+                </span>
+                <span className="mt-1 text-xs text-slate-500">
+                  CSV · XLSX · JSON · JSONL · Up to 40 MB
+                </span>
+              </button>
             </div>
           ) : (
-            /* File Selected & Preview Mode */
             <div className="space-y-4">
-              <div className="flex items-center justify-between rounded-lg border border-slate-700 bg-slate-800/50 p-3">
-                <div className="flex items-center gap-3">
-                  <span className="rounded bg-sky-500/20 px-2 py-1 font-mono text-xs uppercase text-sky-400">
-                    {preview?.format ?? 'FILE'}
-                  </span>
-                  <div>
-                    <p className="text-xs font-medium text-slate-200">{file.name}</p>
-                    <p className="text-[10px] text-slate-400">
-                      {(file.size / (1024 * 1024)).toFixed(2)} MB · {preview?.columns.length ?? 0}{' '}
-                      columns · ~{preview?.totalRowsEstimate ?? 0} rows
-                    </p>
-                  </div>
+              <div className="flex items-center justify-between rounded-lg border border-slate-200 bg-slate-50 p-3.5">
+                <div className="min-w-0">
+                  <p className="text-xs font-semibold text-slate-900 truncate">{file.name}</p>
+                  <p className="mt-0.5 text-[11px] text-slate-500 font-mono tabular-nums">
+                    {(preview?.format ?? 'FILE').toUpperCase()} · {(file.size / 1024).toFixed(1)} KB ·{' '}
+                    {preview?.columns.length ?? 0} cols · ~{preview?.totalRowsEstimate ?? 0} rows
+                  </p>
                 </div>
                 <button
                   type="button"
@@ -171,36 +205,38 @@ export function DatasetUploadModal({ isOpen, onClose, onUploadSuccess }: Dataset
                     setFile(null);
                     setPreview(null);
                   }}
-                  className="text-xs text-slate-400 hover:text-rose-400"
+                  className="text-xs font-medium text-slate-600 hover:text-rose-600 cursor-pointer shrink-0 ml-3"
                 >
-                  Change
+                  Change file
                 </button>
               </div>
 
-              {/* Name Input */}
               <div>
-                <label className="block text-xs font-medium text-slate-300" htmlFor="datasetName">
+                <label className="block text-xs font-semibold text-slate-700" htmlFor="upload-dataset-name">
                   Dataset Name
                 </label>
                 <input
-                  id="datasetName"
+                  id="upload-dataset-name"
                   type="text"
                   required
                   value={datasetName}
                   onChange={(e) => setDatasetName(e.target.value)}
-                  className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-3 py-1.5 text-xs text-slate-100 placeholder-slate-500 focus:border-sky-500 focus:outline-none"
+                  className="mt-1.5 w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-xs text-slate-900 focus:border-[#3b63f6] focus:outline-none"
                 />
               </div>
 
-              {/* Preview Table */}
               <div>
-                <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-slate-400">
+                <h3 className="mb-2 text-xs font-semibold text-slate-700">
                   Data Preview (First 10 Rows)
                 </h3>
                 {loadingPreview ? (
-                  <div className="p-6 text-center text-xs text-slate-400">Parsing preview...</div>
+                  <div className="p-6 text-center text-xs text-slate-500">Parsing preview...</div>
                 ) : preview ? (
-                  <DatasetPreviewTable columns={preview.columns} rows={preview.rows} />
+                  <DatasetPreviewTable
+                    columns={preview.columns}
+                    rows={preview.rows}
+                    totalRowsEstimate={preview.totalRowsEstimate}
+                  />
                 ) : null}
               </div>
             </div>
@@ -208,11 +244,11 @@ export function DatasetUploadModal({ isOpen, onClose, onUploadSuccess }: Dataset
         </div>
 
         {/* Footer */}
-        <div className="flex items-center justify-end gap-3 border-t border-slate-800 bg-slate-950/60 px-6 py-3">
+        <div className="flex items-center justify-end gap-3 border-t border-slate-200 bg-slate-50/70 px-6 py-3.5 rounded-b-xl">
           <button
             type="button"
-            onClick={onClose}
-            className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+            onClick={resetAndClose}
+            className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
           >
             Cancel
           </button>
@@ -220,9 +256,9 @@ export function DatasetUploadModal({ isOpen, onClose, onUploadSuccess }: Dataset
             type="button"
             disabled={!file || uploading || loadingPreview}
             onClick={() => void handleUpload()}
-            className="rounded-lg bg-sky-500 px-4 py-1.5 text-xs font-semibold text-white shadow transition hover:bg-sky-400 disabled:opacity-50"
+            className="rounded-lg bg-[#3b63f6] px-4 py-2 text-xs font-semibold text-white transition hover:bg-[#2f54e0] disabled:opacity-50 cursor-pointer"
           >
-            {uploading ? 'Uploading to Private Storage...' : 'Save & Upload Dataset'}
+            {uploading ? 'Ingesting Dataset...' : 'Ingest & Open Explorer'}
           </button>
         </div>
       </div>

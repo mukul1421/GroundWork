@@ -11,20 +11,8 @@ export default defineConfig({
     },
   },
   server: {
-    port: 5173,
+    port: 3000,
     host: true,
-    proxy: {
-      '/api/azure-ai': {
-        target: 'https://autoclip-gpt4o-mini-resource.services.ai.azure.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/azure-ai/, ''),
-      },
-      '/api/azure-openai': {
-        target: 'https://autoclip-gpt4o-mini-resource.openai.azure.com',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api\/azure-openai/, ''),
-      },
-    },
   },
   build: {
     outDir: 'dist',

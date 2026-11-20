@@ -85,8 +85,10 @@ describe('sklearnExporter', () => {
     expect(code).toContain('from sklearn.compose import ColumnTransformer');
     expect(code).toContain('from sklearn.pipeline import Pipeline');
     expect(code).toContain('train_test_split');
-    expect(code).toContain('target_col = "Survived"');
-    expect(code).toContain('X_train_processed = preprocessor.fit_transform(X_train)');
-    expect(code).toContain('X_test_processed = preprocessor.transform(X_test)');
+    expect(code).toContain('target = "Survived"');
+    expect(code).toContain('numeric_features = [c for c in ["Age"] if c in X_train.columns]');
+    expect(code).toContain('categorical_features = [c for c in ["Sex"] if c in X_train.columns]');
+    expect(code).toContain('rf_pipeline.fit(X_train, y_train)');
+    expect(code).not.toContain('customerID');
   });
 });

@@ -1,13 +1,27 @@
-import React, { useState, useEffect, useCallback, useRef, type ChangeEvent, type DragEvent } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useState, useEffect, useCallback, useRef, type ChangeEvent, type DragEvent } from 'react';
+import { Link, useNavigate } from 'react-router-dom';
 import { useAuth, supabase } from '@/integrations/supabase';
 import { AppSidebar } from '@/components/layout/AppSidebar';
 import { DatasetUploadModal } from '@/components/datasets/DatasetUploadModal';
 import { uploadDataset, deleteDataset } from '@/storage/datasetStorage';
+import {
+  getLocalWorkspaceSnapshot,
+  subscribeLocalWorkspace,
+  uploadLocalDataset,
+  deleteLocalDataset,
+  getActiveVersionOfDataset,
+  type LocalActivityEvent,
+} from '@/storage/localWorkspaceStore';
+import {
+  computeQualityScore,
+  formatRelativeTime,
+  getTimeOfDayGreeting,
+} from '@/engine/localAnalytics';
 import type { Dataset, DatasetVersion } from '@/types/database';
 
 interface DatasetWithVersion extends Dataset {
   active_version?: DatasetVersion | null;
+  computedQuality?: number | null;
 }
 
 export function DashboardPage() {
@@ -17,19 +31,45 @@ export function DashboardPage() {
     workspaces,
     activeWorkspace,
     setActiveWorkspace,
-    signOut,
+    isDemoMode,
   } = useAuth();
   const navigate = useNavigate();
 
   const [datasets, setDatasets] = useState<DatasetWithVersion[]>([]);
+  const [activities, setActivities] = useState<LocalActivityEvent[]>([]);
+  const [pipelinesRunCount, setPipelinesRunCount] = useState<number>(0);
   const [isUploadModalOpen, setIsUploadModalOpen] = useState(false);
-  const [activeMenuId, setActiveMenuId] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<DatasetWithVersion | null>(null);
   const [isDragOver, setIsDragOver] = useState(false);
   const [uploadingDirect, setUploadingDirect] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'error' | 'success'; text: string } | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const showFeedback = (type: 'error' | 'success', text: string) => {
+    setFeedback({ type, text });
+    window.setTimeout(() => {
+      setFeedback((cur) => (cur?.text === text ? null : cur));
+    }, 4000);
+  };
+
   const fetchDatasets = useCallback(async () => {
+    if (isDemoMode) {
+      const snap = getLocalWorkspaceSnapshot();
+      const mapped: DatasetWithVersion[] = snap.datasets.map((ds) => {
+        const activeVer = getActiveVersionOfDataset(ds);
+        return {
+          ...ds,
+          active_version: activeVer,
+          computedQuality: computeQualityScore(activeVer.profile),
+        };
+      });
+      setDatasets(mapped);
+      setActivities(snap.activities);
+      setPipelinesRunCount(snap.pipelinesRun);
+      return;
+    }
+
     if (!activeWorkspace) return;
 
     try {
@@ -61,41 +101,63 @@ export function DashboardPage() {
         const enriched: DatasetWithVersion[] = datasetsData.map((d) => ({
           ...d,
           active_version: d.active_version_id ? versionsMap[d.active_version_id] : null,
+          computedQuality: null,
         }));
         setDatasets(enriched);
+        setActivities(
+          enriched.slice(0, 5).map((ds) => ({
+            id: ds.id,
+            title: 'Dataset synced',
+            detail: `${ds.name} · ${(ds.active_version?.row_count ?? 0).toLocaleString()} rows`,
+            timestamp: ds.updated_at,
+            category: 'upload',
+          })),
+        );
       } else {
         setDatasets([]);
+        setActivities([]);
       }
     } catch {
-      // Graceful error handling
+      showFeedback('error', 'Could not refresh datasets from remote workspace.');
     }
-  }, [activeWorkspace]);
+  }, [activeWorkspace, isDemoMode]);
 
   useEffect(() => {
     void fetchDatasets();
-  }, [fetchDatasets]);
-
-  const handleDeleteDataset = async (dataset: Dataset, e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (!user) return;
-    if (!window.confirm(`Are you sure you want to delete dataset "${dataset.name}"?`)) {
-      return;
+    if (isDemoMode) {
+      return subscribeLocalWorkspace(() => {
+        void fetchDatasets();
+      });
     }
+    return undefined;
+  }, [fetchDatasets, isDemoMode]);
 
+  const handleConfirmDelete = async () => {
+    if (!deleteTarget) return;
     try {
-      await deleteDataset(dataset, user.id);
-      await fetchDatasets();
+      if (isDemoMode) {
+        deleteLocalDataset(deleteTarget.id);
+      } else if (user) {
+        await deleteDataset(deleteTarget, user.id);
+        await fetchDatasets();
+      }
+      showFeedback('success', `Removed "${deleteTarget.name}" from workspace.`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Delete failed');
+      showFeedback('error', err instanceof Error ? err.message : 'Delete failed.');
     } finally {
-      setActiveMenuId(null);
+      setDeleteTarget(null);
     }
   };
 
   const handleDirectUpload = async (file: File) => {
-    if (!user || !activeWorkspace) return;
     setUploadingDirect(true);
     try {
+      if (isDemoMode) {
+        const created = await uploadLocalDataset(file);
+        navigate(`/datasets/${created.id}`);
+        return;
+      }
+      if (!user || !activeWorkspace) return;
       const result = await uploadDataset({
         file,
         workspaceId: activeWorkspace.id,
@@ -105,7 +167,7 @@ export function DashboardPage() {
       await fetchDatasets();
       navigate(`/datasets/${result.dataset.id}`);
     } catch (err) {
-      alert(err instanceof Error ? err.message : 'Upload failed');
+      showFeedback('error', err instanceof Error ? err.message : 'Upload failed.');
     } finally {
       setUploadingDirect(false);
     }
@@ -127,129 +189,61 @@ export function DashboardPage() {
     }
   };
 
-  // Calculations for KPI Cards
-  const totalDatasets = datasets.length > 0 ? datasets.length : 12;
+  // Accurate workspace KPIs computed strictly from live workspace state
+  const totalDatasets = datasets.length;
   const totalRowsCount = datasets.reduce(
     (acc, ds) => acc + (ds.active_version?.row_count ?? 0),
     0,
   );
-  const formattedRows =
-    totalRowsCount > 1000000
-      ? `${(totalRowsCount / 1000000).toFixed(2)} M`
-      : totalRowsCount > 1000
-        ? `${(totalRowsCount / 1000).toFixed(1)} k`
-        : totalRowsCount > 0
-          ? totalRowsCount.toString()
-          : '1.24 M';
+  const scoredDatasets = datasets.filter(
+    (d) => typeof d.computedQuality === 'number',
+  );
+  const avgQuality =
+    scoredDatasets.length > 0
+      ? (
+          scoredDatasets.reduce((sum, d) => sum + (d.computedQuality ?? 0), 0) /
+          scoredDatasets.length
+        ).toFixed(1)
+      : null;
 
   const userDisplayName =
-    profile?.display_name || user?.email?.split('@')[0] || 'Mukul';
-  const avatarLetter = userDisplayName.charAt(0).toUpperCase();
-
-  // Mock list to ensure empty dashboard looks stunning if user just started
-  const displayDatasets: DatasetWithVersion[] =
-    datasets.length > 0
-      ? datasets
-      : ([
-          {
-            id: 'mock-1',
-            name: 'customer_churn.csv',
-            workspace_id: activeWorkspace?.id ?? 'ws-1',
-            source_format: 'csv',
-            created_at: new Date(Date.now() - 2 * 3600000).toISOString(),
-            active_version_id: 'v1',
-            active_version: {
-              id: 'v1',
-              dataset_id: 'mock-1',
-              version_number: 1,
-              row_count: 7043,
-              column_count: 21,
-              file_size_bytes: 450000,
-              bucket_id: 'datasets',
-              storage_path: 'mock/path',
-              content_sha256: 'abc',
-              created_by: user?.id ?? 'u1',
-              created_at: new Date(Date.now() - 2 * 3600000).toISOString(),
-              schema_json: null,
-            },
-          },
-          {
-            id: 'mock-2',
-            name: 'sales_forecast.csv',
-            workspace_id: activeWorkspace?.id ?? 'ws-1',
-            source_format: 'csv',
-            created_at: new Date(Date.now() - 24 * 3600000).toISOString(),
-            active_version_id: 'v1',
-            active_version: {
-              id: 'v1',
-              dataset_id: 'mock-2',
-              version_number: 1,
-              row_count: 15370,
-              column_count: 16,
-              file_size_bytes: 890000,
-              bucket_id: 'datasets',
-              storage_path: 'mock/path',
-              content_sha256: 'def',
-              created_by: user?.id ?? 'u1',
-              created_at: new Date(Date.now() - 24 * 3600000).toISOString(),
-              schema_json: null,
-            },
-          },
-          {
-            id: 'mock-3',
-            name: 'marketing_campaign.csv',
-            workspace_id: activeWorkspace?.id ?? 'ws-1',
-            source_format: 'csv',
-            created_at: new Date(Date.now() - 48 * 3600000).toISOString(),
-            active_version_id: 'v1',
-            active_version: {
-              id: 'v1',
-              dataset_id: 'mock-3',
-              version_number: 1,
-              row_count: 62418,
-              column_count: 28,
-              file_size_bytes: 3200000,
-              bucket_id: 'datasets',
-              storage_path: 'mock/path',
-              content_sha256: 'ghi',
-              created_by: user?.id ?? 'u1',
-              created_at: new Date(Date.now() - 48 * 3600000).toISOString(),
-              schema_json: null,
-            },
-          },
-        ] as DatasetWithVersion[]);
+    profile?.display_name || user?.email?.split('@')[0] || 'Data Engineer';
+  const greeting = getTimeOfDayGreeting();
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] text-slate-800 antialiased">
-      {/* Fixed Left Navigation Sidebar matching 01 — WORKSPACE */}
+    <div className="min-h-screen bg-[#fafafd] text-slate-900 antialiased">
       <AppSidebar
         activeItem="overview"
         onNewDatasetClick={() => setIsUploadModalOpen(true)}
       />
 
-      {/* Main Page Area */}
-      <div className="pl-60 min-h-screen flex flex-col">
-        {/* Top Header */}
-        <header className="sticky top-0 z-20 flex h-20 items-center justify-between border-b border-[#eaecf0] bg-white px-8">
-          <div>
-            <h1 className="text-xl font-bold text-slate-900 tracking-tight">
-              Good afternoon, {userDisplayName} 👋
+      <div className="lg:pl-60 min-h-screen flex flex-col">
+        {/* Clean Single-Row Top Bar */}
+        <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-4 border-b border-slate-200/80 bg-white/95 backdrop-blur-sm px-6 lg:px-8">
+          <div className="min-w-0">
+            <h1 className="font-display text-lg font-bold text-slate-900 tracking-tight truncate">
+              {greeting}, {userDisplayName}
             </h1>
-            <p className="text-xs text-slate-500 mt-0.5">
-              Your agentic workspace for data preprocessing, EDA and ML readiness.
+            <p className="text-xs text-slate-500 truncate">
+              {activeWorkspace?.name ?? 'Groundwork Workspace'} · Browser-local data preparation
             </p>
           </div>
 
-          <div className="flex items-center gap-4">
-            {/* Workspace quick switcher */}
+          <div className="flex items-center gap-3 shrink-0">
+            {workspaces.length > 1 && (
+              <label className="sr-only" htmlFor="workspace-select">
+                Active workspace
+              </label>
+            )}
             {workspaces.length > 1 && (
               <select
+                id="workspace-select"
                 value={activeWorkspace?.id ?? ''}
                 onChange={(e) => {
                   const ws = workspaces.find((w) => w.id === e.target.value);
                   if (ws) setActiveWorkspace(ws);
                 }}
-                className="rounded-lg border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-700 shadow-xs focus:outline-none"
+                className="rounded-lg border border-slate-200 bg-white px-2.5 py-1.5 text-xs font-medium text-slate-700 focus:border-indigo-500 focus:outline-none"
               >
                 {workspaces.map((ws) => (
                   <option key={ws.id} value={ws.id}>
@@ -259,55 +253,42 @@ export function DashboardPage() {
               </select>
             )}
 
-            {/* Notification Bell */}
             <button
               type="button"
-              className="relative p-2 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition"
-              title="Notifications"
+              onClick={() => setIsUploadModalOpen(true)}
+              className="hidden sm:inline-flex rounded-lg bg-slate-900 px-4 py-2 text-xs font-semibold text-white transition hover:bg-indigo-600 whitespace-nowrap cursor-pointer"
             >
-              <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M15 17h5l-1.405-1.405A2.032 2.032 0 0118 14.158V11a6.002 6.002 0 00-4-5.659V5a2 2 0 10-4 0v.341C7.67 6.165 6 8.388 6 11v3.159c0 .538-.214 1.055-.595 1.436L4 17h5m6 0v1a3 3 0 11-6 0v-1m6 0H9" />
-              </svg>
-              <span className="absolute top-1.5 right-1.5 h-2 w-2 rounded-full bg-blue-600 ring-2 ring-white" />
+              Upload Dataset
             </button>
-
-            {/* User Avatar */}
-            <div className="relative group">
-              <button
-                type="button"
-                className="flex h-8 w-8 items-center justify-center rounded-full bg-[#4f46e5] text-white font-bold text-xs shadow-xs"
-              >
-                {avatarLetter}
-              </button>
-              <div className="absolute right-0 top-full mt-2 hidden w-44 rounded-xl border border-slate-200 bg-white p-2 shadow-lg group-hover:block">
-                <p className="px-2 py-1 text-xs font-semibold text-slate-800 truncate">{userDisplayName}</p>
-                <p className="px-2 pb-2 text-[10px] text-slate-400 truncate">{user?.email}</p>
-                <button
-                  type="button"
-                  onClick={() => void signOut()}
-                  className="w-full text-left rounded-md px-2 py-1.5 text-xs text-rose-600 hover:bg-rose-50"
-                >
-                  Sign Out
-                </button>
-              </div>
-            </div>
           </div>
         </header>
 
-        {/* Content Body */}
-        <main className="flex-1 p-8 space-y-6 max-w-7xl mx-auto w-full">
-          {/* Hero Upload Card matching 01 — WORKSPACE */}
-          <div className="rounded-2xl border border-[#eaecf0] bg-white p-6 shadow-xs flex flex-col md:flex-row items-center justify-between gap-6">
+        <main className="flex-1 mx-auto w-full max-w-6xl p-6 lg:p-8 space-y-6">
+          {feedback && (
+            <div
+              role="status"
+              className={`rounded-xl border px-4 py-2.5 text-xs font-medium ${
+                feedback.type === 'error'
+                  ? 'border-rose-200 bg-rose-50 text-rose-700'
+                  : 'border-emerald-200 bg-emerald-50 text-emerald-800'
+              }`}
+            >
+              {feedback.text}
+            </div>
+          )}
+
+          {/* Quick Ingestion Dropzone */}
+          <section className="rounded-xl border border-slate-200 bg-white p-6 flex flex-col md:flex-row items-center justify-between gap-6">
             <div className="space-y-1.5 max-w-md">
-              <h2 className="text-lg font-bold text-slate-900 tracking-tight">
-                Start with your data.
+              <h2 className="font-display text-base font-bold text-slate-900 tracking-tight">
+                Ingest a dataset into browser memory
               </h2>
               <p className="text-xs text-slate-500 leading-relaxed">
-                Upload a dataset and let AI agents profile, clean, and prepare it for modeling.
+                Drop any CSV, Excel, or JSON file to compute exact column profiles, visualize
+                distributions, and generate reproducible Scikit-Learn preprocessing code.
               </p>
             </div>
 
-            {/* Drag & drop upload area */}
             <div
               onDragOver={(e) => {
                 e.preventDefault();
@@ -315,277 +296,338 @@ export function DashboardPage() {
               }}
               onDragLeave={() => setIsDragOver(false)}
               onDrop={handleDrop}
-              onClick={() => fileInputRef.current?.click()}
-              className={`w-full md:w-96 rounded-xl border-2 border-dashed transition-all p-5 text-center cursor-pointer ${
+              className={`w-full md:w-96 rounded-xl border border-dashed transition-colors p-5 text-center ${
                 isDragOver
-                  ? 'border-[#3b5bf6] bg-[#f0f4ff]'
-                  : 'border-[#d0d5dd] bg-[#fcfcfd] hover:border-[#3b5bf6] hover:bg-[#f8faff]'
+                  ? 'border-indigo-500 bg-indigo-50/60'
+                  : 'border-slate-300 bg-[#fafafd] hover:border-indigo-400'
               }`}
             >
               <input
                 ref={fileInputRef}
                 type="file"
-                accept=".csv,.parquet,.xlsx,.json"
+                accept=".csv,.xlsx,.xls,.json,.jsonl"
                 className="hidden"
                 onChange={handleFileInputChange}
               />
-              <div className="mx-auto flex h-9 w-9 items-center justify-center rounded-lg bg-[#f0f4ff] text-[#3b5bf6] mb-2">
-                {uploadingDirect ? (
-                  <div className="h-4 w-4 animate-spin rounded-full border-2 border-[#3b5bf6] border-t-transparent" />
-                ) : (
-                  <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12" />
-                  </svg>
-                )}
-              </div>
-              <p className="text-xs font-semibold text-slate-800">
-                Drag & drop your CSV, Excel or Parquet
-              </p>
-              <p className="text-[11px] text-slate-500 mt-0.5">
-                or <span className="text-[#3b5bf6] font-semibold hover:underline">browse files</span>
-              </p>
-            </div>
-          </div>
-
-          {/* 4 KPI Metric Cards in a Row */}
-          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-            {/* 1. Datasets */}
-            <div className="rounded-xl border border-[#eaecf0] bg-white p-5 shadow-xs">
-              <div className="flex items-center gap-2 mb-2">
-                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 7v10c0 2 1.5 3 3.5 3h9c2 0 3.5-1 3.5-3V7M4 7c0-2 1.5-3 3.5-3h9c2 0 3.5 1 3.5 3M4 7h16m-8 4v6m-4-3h8" />
-                  </svg>
+              <button
+                type="button"
+                disabled={uploadingDirect}
+                onClick={() => fileInputRef.current?.click()}
+                className="w-full flex flex-col items-center justify-center cursor-pointer disabled:opacity-60"
+              >
+                <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-indigo-50 text-indigo-600 mb-2">
+                  {uploadingDirect ? (
+                    <div className="h-4 w-4 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent" />
+                  ) : (
+                    <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" aria-hidden="true">
+                      <path
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        strokeWidth={2}
+                        d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"
+                      />
+                    </svg>
+                  )}
                 </div>
-                <span className="text-xs font-medium text-slate-500">Datasets</span>
-              </div>
-              <div className="text-2xl font-bold text-slate-900 tracking-tight">
+                <span className="text-xs font-semibold text-slate-800">
+                  {uploadingDirect ? 'Parsing dataset...' : 'Drop CSV, Excel, or JSON here'}
+                </span>
+                <span className="text-[11px] text-slate-500 mt-0.5">
+                  or <span className="text-indigo-600 font-medium">browse local files</span>
+                </span>
+              </button>
+            </div>
+          </section>
+
+          {/* 4 Honest KPI Cards (strict tabular-nums, zero fabricated deltas) */}
+          <section className="grid grid-cols-2 lg:grid-cols-4 gap-4" aria-label="Workspace metrics">
+            <div className="rounded-xl border border-slate-200 bg-white p-5">
+              <div className="text-xs font-medium text-slate-500">Datasets</div>
+              <div className="mt-2 font-mono text-2xl font-bold text-slate-900 tabular-nums">
                 {totalDatasets}
               </div>
-              <div className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-emerald-600">
-                <span>+3 this week</span>
+              <div className="mt-1 text-[11px] text-slate-500">
+                Active in workspace
               </div>
             </div>
 
-            {/* 2. Rows Processed */}
-            <div className="rounded-xl border border-[#eaecf0] bg-white p-5 shadow-xs">
-              <div className="flex items-center gap-2 mb-2">
-                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-blue-50 text-blue-600">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-                  </svg>
-                </div>
-                <span className="text-xs font-medium text-slate-500">Rows Processed</span>
+            <div className="rounded-xl border border-slate-200 bg-white p-5">
+              <div className="text-xs font-medium text-slate-500">Total Rows</div>
+              <div className="mt-2 font-mono text-2xl font-bold text-slate-900 tabular-nums">
+                {totalRowsCount.toLocaleString()}
               </div>
-              <div className="text-2xl font-bold text-slate-900 tracking-tight">
-                {formattedRows}
-              </div>
-              <div className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-emerald-600">
-                <span>+18%</span>
+              <div className="mt-1 text-[11px] text-slate-500">
+                Across active versions
               </div>
             </div>
 
-            {/* 3. Avg. Quality Score */}
-            <div className="rounded-xl border border-[#eaecf0] bg-white p-5 shadow-xs">
-              <div className="flex items-center gap-2 mb-2">
-                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-emerald-50 text-emerald-600">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
-                  </svg>
-                </div>
-                <span className="text-xs font-medium text-slate-500">Avg. Quality Score</span>
+            <div className="rounded-xl border border-slate-200 bg-white p-5">
+              <div className="text-xs font-medium text-slate-500">Avg. Quality Score</div>
+              <div className="mt-2 font-mono text-2xl font-bold text-slate-900 tabular-nums">
+                {avgQuality !== null ? `${avgQuality}%` : '—'}
               </div>
-              <div className="text-2xl font-bold text-slate-900 tracking-tight">
-                94.6%
-              </div>
-              <div className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-emerald-600">
-                <span>+2.8 pp</span>
+              <div className="mt-1 text-[11px] text-slate-500">
+                {avgQuality !== null ? 'Computed from profiles' : 'Profile a dataset to score'}
               </div>
             </div>
 
-            {/* 4. Pipelines Run */}
-            <div className="rounded-xl border border-[#eaecf0] bg-white p-5 shadow-xs">
-              <div className="flex items-center gap-2 mb-2">
-                <div className="flex h-7 w-7 items-center justify-center rounded-lg bg-amber-50 text-amber-600">
-                  <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                  </svg>
-                </div>
-                <span className="text-xs font-medium text-slate-500">Pipelines Run</span>
+            <div className="rounded-xl border border-slate-200 bg-white p-5">
+              <div className="text-xs font-medium text-slate-500">Pipelines Run</div>
+              <div className="mt-2 font-mono text-2xl font-bold text-slate-900 tabular-nums">
+                {pipelinesRunCount}
               </div>
-              <div className="text-2xl font-bold text-slate-900 tracking-tight">
-                8
-              </div>
-              <div className="mt-1 flex items-center gap-1 text-[11px] font-semibold text-emerald-600">
-                <span>+5</span>
+              <div className="mt-1 text-[11px] text-slate-500">
+                Verified transformations
               </div>
             </div>
-          </div>
+          </section>
 
-          {/* Split Bottom Section: Recent Datasets (2/3) + Recent Activity (1/3) */}
+          {/* Main 2-Column Split: Recent Datasets (8 cols) + Recent Activity (4 cols) */}
           <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-            {/* Left 8 Columns: Recent Datasets Table */}
-            <div className="lg:col-span-8 rounded-2xl border border-[#eaecf0] bg-white p-6 shadow-xs">
+            <section className="lg:col-span-8 rounded-xl border border-slate-200 bg-white p-6">
               <div className="flex items-center justify-between mb-4">
-                <h3 className="text-sm font-bold text-slate-900">Recent Datasets</h3>
-                <button
-                  type="button"
-                  onClick={() => setIsUploadModalOpen(true)}
-                  className="text-xs font-semibold text-[#3b5bf6] hover:underline flex items-center gap-1 cursor-pointer"
+                <h2 className="font-display text-sm font-bold text-slate-900">Recent Datasets</h2>
+                <Link
+                  to="/datasets"
+                  className="text-xs font-semibold text-[#3b63f6] hover:underline whitespace-nowrap"
                 >
-                  View all <span aria-hidden="true">&rarr;</span>
-                </button>
+                  View all datasets
+                </Link>
               </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full text-left text-xs">
-                  <thead>
-                    <tr className="border-b border-[#eaecf0] text-slate-500 font-semibold">
-                      <th className="pb-3 font-medium">Name</th>
-                      <th className="pb-3 font-medium">Rows</th>
-                      <th className="pb-3 font-medium">Columns</th>
-                      <th className="pb-3 font-medium">Quality</th>
-                      <th className="pb-3 font-medium">Updated</th>
-                      <th className="pb-3 font-medium text-right"></th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#f2f4f7]">
-                    {displayDatasets.slice(0, 5).map((ds, index) => {
-                      const rowCount = ds.active_version?.row_count ?? 7043;
-                      const colCount = ds.active_version?.column_count ?? 21;
-                      const qualityScores = [97, 93, 95, 96, 92];
-                      const quality = qualityScores[index % qualityScores.length];
+              {datasets.length === 0 ? (
+                <div className="py-10 text-center space-y-2">
+                  <p className="text-sm font-medium text-slate-700">No datasets in this workspace</p>
+                  <p className="text-xs text-slate-500">
+                    Upload a CSV, Excel, or JSON file above to begin profiling and cleaning.
+                  </p>
+                </div>
+              ) : (
+                <>
+                  {/* Mobile stacked dataset cards (< sm) */}
+                  <div className="space-y-3 sm:hidden">
+                    {datasets.slice(0, 6).map((ds) => {
+                      const rowCount = ds.active_version?.row_count ?? 0;
+                      const colCount = ds.active_version?.column_count ?? 0;
+                      const quality = ds.computedQuality;
 
                       return (
-                        <tr
+                        <div
                           key={ds.id}
-                          onClick={() => {
-                            if (!ds.id.startsWith('mock-')) {
-                              navigate(`/datasets/${ds.id}`);
-                            }
-                          }}
-                          className="hover:bg-[#f9fafb] cursor-pointer transition group"
+                          className="rounded-xl border border-slate-200 bg-slate-50/50 p-3.5 space-y-2.5"
                         >
-                          <td className="py-3.5 pr-4 font-semibold text-slate-900 flex items-center gap-2.5">
-                            <svg className="w-4 h-4 text-slate-400 group-hover:text-[#3b5bf6] transition" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.8} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                            </svg>
-                            <span className="truncate max-w-[200px]">{ds.name}</span>
-                          </td>
-                          <td className="py-3.5 pr-4 text-slate-600 font-mono">
-                            {rowCount.toLocaleString()}
-                          </td>
-                          <td className="py-3.5 pr-4 text-slate-600 font-mono">
-                            {colCount}
-                          </td>
-                          <td className="py-3.5 pr-4">
-                            <span className="inline-flex items-center rounded-full bg-emerald-50 px-2 py-0.5 text-[11px] font-semibold text-emerald-700 border border-emerald-200">
-                              {quality}%
-                            </span>
-                          </td>
-                          <td className="py-3.5 pr-4 text-slate-500">
-                            {index === 0 ? '2 h ago' : index === 1 ? '1 d ago' : '2 d ago'}
-                          </td>
-                          <td className="py-3.5 text-right relative">
+                          <div className="flex items-start justify-between gap-2">
                             <button
                               type="button"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                setActiveMenuId(activeMenuId === ds.id ? null : ds.id);
-                              }}
-                              className="p-1 text-slate-400 hover:text-slate-700 rounded cursor-pointer"
+                              onClick={() => navigate(`/datasets/${ds.id}`)}
+                              className="text-left text-xs font-semibold text-slate-900 hover:text-[#3b63f6] truncate cursor-pointer"
                             >
-                              •••
+                              {ds.name}
                             </button>
-                            {activeMenuId === ds.id && (
-                              <div className="absolute right-0 top-full z-10 w-36 rounded-xl border border-slate-200 bg-white p-1 shadow-lg text-left">
+                            {typeof quality === 'number' && (
+                              <span
+                                className={`shrink-0 font-mono text-xs font-semibold tabular-nums ${
+                                  quality >= 90
+                                    ? 'text-emerald-700'
+                                    : quality >= 75
+                                      ? 'text-amber-700'
+                                      : 'text-rose-700'
+                                }`}
+                              >
+                                {quality}%
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center justify-between text-[11px] text-slate-500 font-mono tabular-nums">
+                            <span>
+                              {rowCount.toLocaleString()} rows · {colCount} cols
+                            </span>
+                            <span className="font-sans">{formatRelativeTime(ds.updated_at)}</span>
+                          </div>
+                          <div className="flex items-center gap-4 border-t border-slate-200/80 pt-2 text-xs">
+                            <button
+                              type="button"
+                              onClick={() => navigate(`/datasets/${ds.id}`)}
+                              className="font-semibold text-[#3b63f6] hover:underline cursor-pointer"
+                            >
+                              Open
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => navigate(`/pipelines?datasetId=${ds.id}`)}
+                              className="font-medium text-slate-600 hover:text-slate-900 cursor-pointer"
+                            >
+                              Pipeline
+                            </button>
+                            <button
+                              type="button"
+                              aria-label={`Delete ${ds.name}`}
+                              onClick={() => setDeleteTarget(ds)}
+                              className="ml-auto font-medium text-rose-600 hover:text-rose-800 cursor-pointer"
+                            >
+                              Delete
+                            </button>
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Desktop table (>= sm) */}
+                  <div className="hidden sm:block overflow-x-auto">
+                    <table className="w-full min-w-[600px] text-left text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-200 text-slate-500">
+                          <th className="pb-3 font-medium">Name</th>
+                          <th className="pb-3 font-medium text-right">Rows</th>
+                          <th className="pb-3 font-medium text-right">Columns</th>
+                          <th className="pb-3 font-medium text-right">Quality</th>
+                          <th className="pb-3 font-medium pl-4">Updated</th>
+                          <th className="pb-3 font-medium text-right">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {datasets.slice(0, 6).map((ds) => {
+                          const rowCount = ds.active_version?.row_count ?? 0;
+                          const colCount = ds.active_version?.column_count ?? 0;
+                          const quality = ds.computedQuality;
+
+                          return (
+                            <tr key={ds.id} className="hover:bg-slate-50/70 transition">
+                              <td className="py-3.5 pr-4">
                                 <button
                                   type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    navigate(`/datasets/${ds.id}`);
-                                  }}
-                                  className="w-full rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 font-medium"
+                                  onClick={() => navigate(`/datasets/${ds.id}`)}
+                                  className="font-semibold text-slate-900 hover:text-[#3b63f6] transition text-left truncate max-w-[200px] block cursor-pointer"
                                 >
-                                  Open Explorer
+                                  {ds.name}
                                 </button>
-                                <button
-                                  type="button"
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    navigate(`/pipelines?datasetId=${ds.id}`);
-                                  }}
-                                  className="w-full rounded-md px-2.5 py-1.5 text-xs text-slate-700 hover:bg-slate-50 font-medium"
-                                >
-                                  Run Pipeline
-                                </button>
-                                {!ds.id.startsWith('mock-') && (
+                              </td>
+                              <td className="py-3.5 px-2 text-right text-slate-600 font-mono tabular-nums">
+                                {rowCount.toLocaleString()}
+                              </td>
+                              <td className="py-3.5 px-2 text-right text-slate-600 font-mono tabular-nums">
+                                {colCount}
+                              </td>
+                              <td className="py-3.5 px-2 text-right font-mono tabular-nums">
+                                {typeof quality === 'number' ? (
+                                  <span
+                                    className={
+                                      quality >= 90
+                                        ? 'font-semibold text-emerald-700'
+                                        : quality >= 75
+                                          ? 'font-semibold text-amber-700'
+                                          : 'font-semibold text-rose-700'
+                                    }
+                                  >
+                                    {quality}%
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-400">—</span>
+                                )}
+                              </td>
+                              <td className="py-3.5 pl-4 text-slate-500 whitespace-nowrap">
+                                {formatRelativeTime(ds.updated_at)}
+                              </td>
+                              <td className="py-3.5 pl-3 text-right whitespace-nowrap">
+                                <div className="inline-flex items-center gap-3">
                                   <button
                                     type="button"
-                                    onClick={(e) => void handleDeleteDataset(ds, e)}
-                                    className="w-full rounded-md px-2.5 py-1.5 text-xs text-rose-600 hover:bg-rose-50 font-medium"
+                                    onClick={() => navigate(`/datasets/${ds.id}`)}
+                                    className="font-semibold text-[#3b63f6] hover:underline cursor-pointer"
+                                  >
+                                    Open
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => navigate(`/pipelines?datasetId=${ds.id}`)}
+                                    className="font-medium text-slate-600 hover:text-slate-900 cursor-pointer"
+                                  >
+                                    Pipeline
+                                  </button>
+                                  <button
+                                    type="button"
+                                    aria-label={`Delete ${ds.name}`}
+                                    onClick={() => setDeleteTarget(ds)}
+                                    className="font-medium text-rose-600 hover:text-rose-800 cursor-pointer"
                                   >
                                     Delete
                                   </button>
-                                )}
-                              </div>
-                            )}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </section>
 
-            {/* Right 4 Columns: Recent Activity Timeline */}
-            <div className="lg:col-span-4 rounded-2xl border border-[#eaecf0] bg-white p-6 shadow-xs">
-              <h3 className="text-sm font-bold text-slate-900 mb-4">Recent Activity</h3>
-              <div className="space-y-5">
-                {/* 1. Preprocessing completed */}
-                <div className="flex items-start gap-3">
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-50 text-emerald-600 border border-emerald-200 mt-0.5">
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2.5} d="M5 13l4 4L19 7" />
-                    </svg>
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-semibold text-slate-900">Preprocessing completed</h4>
-                    <p className="text-[11px] text-slate-500 mt-0.5">customer_churn.csv · 2 h ago</p>
-                  </div>
-                </div>
-
-                {/* 2. EDA generated */}
-                <div className="flex items-start gap-3">
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-purple-50 text-purple-600 border border-purple-200 mt-0.5">
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                    </svg>
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-semibold text-slate-900">EDA generated</h4>
-                    <p className="text-[11px] text-slate-500 mt-0.5">sales_forecast.csv · 1 d ago</p>
-                  </div>
-                </div>
-
-                {/* 3. Pipeline created */}
-                <div className="flex items-start gap-3">
-                  <div className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-blue-50 text-blue-600 border border-blue-200 mt-0.5">
-                    <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 10V3L4 14h7v7l9-11h-7z" />
-                    </svg>
-                  </div>
-                  <div>
-                    <h4 className="text-xs font-semibold text-slate-900">Pipeline created</h4>
-                    <p className="text-[11px] text-slate-500 mt-0.5">churn_model_pipeline · 2 d ago</p>
-                  </div>
-                </div>
-              </div>
-            </div>
+            <section className="lg:col-span-4 rounded-xl border border-slate-200 bg-white p-6">
+              <h2 className="font-display text-sm font-bold text-slate-900 mb-4">
+                Recent Activity
+              </h2>
+              {activities.length === 0 ? (
+                <p className="text-xs text-slate-500">
+                  Workspace events will appear here after you upload or transform datasets.
+                </p>
+              ) : (
+                <ol className="space-y-4">
+                  {activities.slice(0, 5).map((event) => (
+                    <li
+                      key={event.id}
+                      className="border-b border-slate-100 pb-3.5 last:border-none last:pb-0"
+                    >
+                      <div className="text-xs font-semibold text-slate-900">{event.title}</div>
+                      <div className="mt-0.5 text-[11px] text-slate-500">
+                        {event.detail} · {formatRelativeTime(event.timestamp)}
+                      </div>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </section>
           </div>
         </main>
       </div>
+
+      {/* Accessible Delete Confirmation Dialog */}
+      {deleteTarget && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="dashboard-delete-title"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/45 p-4"
+        >
+          <div className="w-full max-w-md rounded-xl border border-slate-200 bg-white p-6 shadow-lg space-y-4">
+            <h2 id="dashboard-delete-title" className="font-display text-base font-bold text-slate-900">
+              Delete dataset?
+            </h2>
+            <p className="text-xs leading-relaxed text-slate-600">
+              Remove <strong className="text-slate-900">{deleteTarget.name}</strong> and its version
+              history from this workspace?
+            </p>
+            <div className="flex items-center justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeleteTarget(null)}
+                className="rounded-lg border border-slate-200 bg-white px-4 py-2 text-xs font-medium text-slate-700 hover:bg-slate-50 cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleConfirmDelete()}
+                className="rounded-lg bg-rose-600 px-4 py-2 text-xs font-semibold text-white hover:bg-rose-700 cursor-pointer"
+              >
+                Delete Dataset
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <DatasetUploadModal
         isOpen={isUploadModalOpen}

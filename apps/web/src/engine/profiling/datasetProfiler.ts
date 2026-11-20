@@ -1,7 +1,11 @@
 import type { AsyncDuckDBConnection } from '@duckdb/duckdb-wasm';
-import type { Table } from 'apache-arrow';
 import { supabase } from '@/integrations/supabase';
 import type { Json } from '@/types/database';
+
+interface ArrowTableLike {
+  getChild(name: string): { get(index: number): unknown } | null;
+  getChildAt(index: number): { get(index: number): unknown } | null;
+}
 
 export interface NumericStats {
   min: number | null;
@@ -48,7 +52,7 @@ export interface DatasetProfileSummary {
  * Bulletproof helper to extract a scalar value from an Apache Arrow Table.
  * Avoids StructRowProxy traps and supports case-insensitivity & numeric indices.
  */
-function getScalar(table: Table, nameOrIndex: string | number, rowIndex = 0): unknown {
+function getScalar(table: ArrowTableLike, nameOrIndex: string | number, rowIndex = 0): unknown {
   try {
     const col =
       typeof nameOrIndex === 'string'
